@@ -12,6 +12,11 @@ This repo contains:
 ## References
 Linux Source Code: <https://github.com/torvalds/linux>
 
+## Structure 
+``` text
+study/ - any book or source study
+labs/ - any implementation for practice
+```
 ## Goals
 
 - Understand how software interacts with hardware.
