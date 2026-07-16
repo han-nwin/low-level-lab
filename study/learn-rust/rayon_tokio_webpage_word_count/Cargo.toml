@@ -1,0 +1,8 @@
+[package]
+name = "rayon_tokio_webpage_word_count"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.28.2", features = ["full"] }
+rayon = "1.7.0"

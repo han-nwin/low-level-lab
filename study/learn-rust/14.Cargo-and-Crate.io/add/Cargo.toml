@@ -1,0 +1,3 @@
+[workspace]
+resolver = "3" # Setting latest resolver version "3"
+members = ["add_one","adder"]

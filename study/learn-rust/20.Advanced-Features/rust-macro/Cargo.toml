@@ -1,0 +1,10 @@
+[package]
+name = "rust-macro"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+useful_macros = { path = "useful_macros" }
+hello_macro = { path = "hello_macro" }
+hello_macro_derive = { path = "hello_macro/hello_macro_derive" }
+route_macro = { path = "route_macro" }

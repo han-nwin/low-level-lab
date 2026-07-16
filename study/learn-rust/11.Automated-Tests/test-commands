@@ -1,0 +1,32 @@
+# Summary of Commands for Running Tests in Rust
+
+1. **Running Tests**: 
+   - Use the command `cargo test` to run all tests in the current package.
+
+2. **Running Specific Tests**: 
+   - To run a specific test, use `cargo test test_name`, replacing `test_name` with the name of the test you want to run.
+
+3. **Running Tests with a Filter**: 
+   - You can filter tests by name using `cargo test filter_string`, where `filter_string` is part of the test name.
+
+4. **Running Tests in Release Mode**: 
+   - Use `cargo test --release` to run tests with optimizations enabled.
+
+5. **Viewing Test Output**: 
+   - By default, test output is hidden. Use the `-- --show-output` flag to see the output of the tests.
+
+6. **Ignoring Tests**: 
+   - You can ignore tests by adding the `#[ignore]` attribute to the test function. To run ignored tests, use `cargo test -- --ignored`.
+
+7. **Running Tests in Parallel**: 
+   - Tests are run in parallel by default. You can control the number of threads with the `--test-threads` option.
+
+8. **Custom Test Frameworks**: 
+   - You can create custom test frameworks by implementing the `#[test]` attribute and using the `#[cfg(test)]` module.
+
+9. **Assertions**: 
+   - Use `assert!`, `assert_eq!`, and `assert_ne!` macros to perform assertions in tests.
+
+10. **Documentation Tests**: 
+    - You can write tests in your documentation comments using the `///` syntax, which will be run with `cargo test`.
+

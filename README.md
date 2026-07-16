@@ -9,17 +9,8 @@ This repo contains:
 - 🛠️ Experiments and implementations of low-level concepts
 - 📈 Performance benchmarks and profiling
 
-## Structure
-
-```text
-books/            # Book exercises
-source-reading/   # Notes while reading production code
-linux/            # Linux kernel modules & experiments
-memory/           # Memory management experiments
-concurrency/      # Synchronization & scheduling
-benchmarks/       # Performance comparisons
-notes/            # General notes
-```
+## References
+Linux Source Code: <https://github.com/torvalds/linux>
 
 ## Goals
 

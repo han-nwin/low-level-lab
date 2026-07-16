@@ -1,0 +1,9 @@
+[package]
+name = "fut_tasks_threads"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+trpl = "0.3.0"
+tokio = { version = "1.28.2", features = ["full"] }
+

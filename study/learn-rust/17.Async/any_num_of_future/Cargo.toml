@@ -1,0 +1,7 @@
+[package]
+name = "any_num_of_future"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+trpl = "0.3.0"
