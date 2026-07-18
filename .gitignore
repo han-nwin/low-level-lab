@@ -1,1 +1,30 @@
-*target/
+# Rust target/
+target/
+
+# Out-of-source build directories
+build/
+cmake-build-*/
+
+# CMake-generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Compiled output
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+
+# env
+.env
+.env.*
+.venv
+
+.DS_Store
