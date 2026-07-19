@@ -35,6 +35,7 @@ fn main() {
         // compare with wc -c (count bytes)
         // printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:9999\r\nUser-Agent: curl/8.17.0\r\nAccept: */*\r\n\r\n' | wc -c
 
-        let parsed_request = Request::parse(&buffer);
+        let parsed_request = Request::parse(&buffer).unwrap();
+        println!("Parsed: {parsed_request}");
     }
 }

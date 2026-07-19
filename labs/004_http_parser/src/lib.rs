@@ -43,16 +43,20 @@
 //     body: Some(b"{\"name\":\"Han\",\"role\":\"admin\"}"),
 // }
 
+use std::fmt::Display;
+
 // assert_eq!(
 //     b"{\"name\":\"Han\"}",
 //     br#"{"name":"Han"}"#
 // );
-enum Method {
+#[derive(Debug)]
+pub enum Method {
     POST,
     GET,
 }
 
-enum Version {
+#[derive(Debug)]
+pub enum Version {
     HTTP1_0,
     HTTP1_1,
 }
@@ -67,22 +71,23 @@ pub enum ParseError {
     InvalidHeader,
 }
 
-struct Header {
-    name: String,
-    value: String,
+#[derive(Debug)]
+pub struct Header<'a> {
+    pub name: &'a str,
+    pub value: &'a str,
 }
-
+#[derive(Debug)]
 pub struct Request<'a> {
     pub method: Method,
     pub path: &'a str,
     pub query: Option<&'a str>,
     pub version: Version,
-    pub headers: Vec<Header>,
+    pub headers: Vec<Header<'a>>,
     pub body: Option<&'a [u8]>, // byte array -> represent byte string of the body
 }
 
 impl<'a> Request<'a> {
-    pub fn parse(raw_request_bytes: &'a [u8]) -> Result<Request, ParseError> {
+    pub fn parse(raw_request_bytes: &'a [u8]) -> Result<Request<'a>, ParseError> {
         let mut remaining_bytes = raw_request_bytes;
 
         let line_end = remaining_bytes
@@ -138,15 +143,70 @@ impl<'a> Request<'a> {
             .transpose()
             .map_err(|_| ParseError::InvalidTarget)?;
 
-        // TODO: 2. header
-        // TODO: 3. body
+        // 2. Header
+
+        // update remaining bytes
+        remaining_bytes = &remaining_bytes[line_end + 2..];
+        let line_end = remaining_bytes
+            .windows(4) // similar to .iter() but do 4 elements at a time
+            .position(|quad| quad == b"\r\n\r\n") // match the \r\n\r\n to end header
+            .ok_or(ParseError::MissingCRLF)?;
+        let header_lines = &remaining_bytes[..line_end];
+        // turn those byte lines to str
+        let header_lines_str =
+            str::from_utf8(header_lines).map_err(|_| ParseError::InvalidHeader)?;
+        // perform split on the str
+        let mut content_length = 0; //predefine contene length
+        let headers: Vec<Header<'a>> = header_lines_str
+            .split("\r\n")
+            .map(|line| {
+                let (name, value) = line.split_once(": ").ok_or(ParseError::InvalidHeader)?;
+                if name == "Content-Length" {
+                    content_length = value
+                        .parse::<usize>()
+                        .map_err(|_| ParseError::InvalidHeader)?;
+                } // get content length
+                Ok(Header { name, value })
+            })
+            .collect::<Result<Vec<_>, ParseError>>()?; // return a Result
+
+        // Body
+        // Based ont content-length read from the next byte position
+        let body: Option<&[u8]> = if content_length > 0 {
+            // + 4 because header \r\n\r\n body
+            let body = &remaining_bytes[line_end + 4..line_end + 4 + content_length];
+            Some(body)
+        } else {
+            None
+        };
+
         Ok(Request {
             method,
             path,
             query,
             version,
-            headers: vec![],
-            body: None,
+            headers,
+            body,
         })
+    }
+}
+
+impl Display for Request<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "\nRequest: {{\n method: {:?},\n path: {:?},\n query: {:?},\n version: {:?},\n",
+            self.method,
+            self.path,
+            self.query.unwrap(),
+            self.version,
+        )?;
+
+        for header in &self.headers {
+            writeln!(f, " {}: {},", header.name, header.value)?;
+        }
+        writeln!(f, "  body: {}", str::from_utf8(self.body.unwrap()).unwrap())?;
+
+        write!(f, "}}")
     }
 }
