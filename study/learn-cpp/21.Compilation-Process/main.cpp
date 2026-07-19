@@ -1,14 +1,17 @@
 #include <iostream>
 
-// Try each stage separately:
-//   clang++ -E main.cpp -o main.ii          # preprocess: expand
-//   #include/#define clang++ -std=c++17 -S main.ii -o main.s # compile: C++ ->
-//   assembly clang++ -c main.s -o main.o             # assemble: assembly ->
-//   object file clang++ main.o -o compilation           # link:
-//   objects/libraries -> executable
+// Try each stage separately (the text after each command explains its output):
+//   clang++ -std=c++20 -E main.cpp -o main.ii
+//     Preprocess: expand directives such as #include and #define.
+//   clang++ -std=c++20 -S main.ii -o main.s
+//     Compile: translate preprocessed C++ into assembly.
+//   clang++ -c main.s -o main.o
+//     Assemble: translate assembly into an object file.
+//   clang++ main.o -o compilation
+//     Link: combine object files and libraries into an executable.
 //
 // A normal command performs all stages:
-//   clang++ -std=c++17 main.cpp -o compilation
+//   clang++ -std=c++20 main.cpp -o compilation
 
 #define COURSE_NAME "learn-cpp" // replaced during preprocessing
 

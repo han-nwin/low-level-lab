@@ -5,7 +5,7 @@
 //   cmake_minimum_required(VERSION 3.20)
 //   project(cmake_lesson LANGUAGES CXX)
 //   add_executable(cmake_lesson main.cpp)
-//   target_compile_features(cmake_lesson PRIVATE cxx_std_17)
+//   target_compile_features(cmake_lesson PRIVATE cxx_std_20)
 //   target_compile_options(cmake_lesson PRIVATE -Wall -Wextra -Wpedantic)
 //
 // Configure and build out-of-source:
