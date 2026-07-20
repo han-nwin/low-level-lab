@@ -1,0 +1,11 @@
+[package]
+name = "parallel"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rand = "0.10"
+rayon = "1.10"

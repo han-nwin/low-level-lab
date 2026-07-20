@@ -1,0 +1,10 @@
+Cargo.lock
+target/
+*~
+book/
+*.swp
+lines.txt
+.idea/
+.skeptic-cache
+.lycheecache
+.deploy.sh

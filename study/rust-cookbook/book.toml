@@ -1,0 +1,33 @@
+
+[book]
+title = "Rust Cookbook"
+description = "Collection of useful Rust code examples"
+authors = ["Rust Language Community"]
+language = "en"
+src = "src"
+
+[rust]
+edition = "2018"
+
+[output.html]
+mathjax-support = false
+# theme = "theme"
+additional-css = ["theme/custom.css"]
+git-repository-url = "https://github.com/rust-lang-nursery/rust-cookbook"
+edit-url-template = "https://github.com/rust-lang-nursery/rust-cookbook/edit/master/{path}"
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.playpen]
+editable = false
+
+[output.html.search]
+limit-results = 20
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 2
+boost-paragraph = 1
+expand = true
+heading-split-level = 2
