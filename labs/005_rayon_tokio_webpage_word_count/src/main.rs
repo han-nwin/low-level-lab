@@ -14,8 +14,8 @@ async fn main() -> anyhow::Result<()> {
     let mut handles = Vec::new();
 
     // NOTE: consume args into inter
-    // since spawn will move url and if we take it from args
-    // the tasks don't guarantee the lifetime aka args might end before the task
+    // tokio::spawn requires the future to own its captured data
+    // or otherwise contain only 'static references.
     for url in args.into_iter().skip(1) {
         let handle = tokio::spawn(async move {
             let response = reqwest::get(&url)
