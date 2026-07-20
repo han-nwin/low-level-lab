@@ -1,0 +1,6 @@
+[package]
+name = "raspot_driver_wheels"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
