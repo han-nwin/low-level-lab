@@ -71,7 +71,15 @@ async fn get(url: &str) -> Result<Response, RequestError> {
         .await
         .map_err(|_| RequestError::TcpConnect)?;
 
-    let request_bytes = b"GET / HTTP/1.1\r\nHost: www.google.com\r\nConnection: close\r\n\r\n";
+    let request = format!(
+        "GET / HTTP/1.1\r\n\
+       Host: {url}\r\n\
+       User-Agent: low-level-http-lab/0.1\r\n\
+       Accept: */*\r\n\
+       Connection: close\r\n\
+       \r\n"
+    );
+    let request_bytes = request.as_bytes();
 
     stream
         .write_all(request_bytes)
@@ -85,12 +93,12 @@ async fn get(url: &str) -> Result<Response, RequestError> {
         .map_err(|_| RequestError::Socket)?;
 
     let response_text = str::from_utf8(&buffer).map_err(|_| RequestError::Socket)?;
-    let first_100_words = response_text
+    let first_10_words = response_text
         .split_whitespace()
-        .take(100)
+        .take(10)
         .collect::<Vec<_>>()
         .join(" ");
-    println!("first_100_words: {first_100_words}");
+    println!("first_10_words: {first_10_words}");
 
     Ok(Response {})
 }
@@ -112,9 +120,33 @@ fn main() {
         .unwrap_or_else(|e| panic!("thread pool error: {}", e));
 
     runtime.block_on(async {
-        match get("www.google.com:80").await {
-            Ok(response) => println!("response: {response:?}"),
-            Err(error) => println!("error: {error:?}"),
-        };
+        let google = tokio::spawn(async {
+            let result = get("www.google.com:80").await;
+            match &result {
+                Ok(response) => println!("response google: {response:?}"),
+                Err(error) => println!("error: {error:?}"),
+            }
+            result // return result back to google var
+        });
+
+        let tesla = tokio::spawn(async {
+            let result = get("www.tesla.com:80").await;
+            match &result {
+                Ok(response) => println!("response tesla: {response:?}"),
+                Err(error) => println!("error: {error:?}"),
+            }
+            result // return result back to tesla var
+        });
+
+        let fifa = tokio::spawn(async {
+            let result = get("www.fifa.com:80").await;
+            match &result {
+                Ok(response) => println!("response fifa: {response:?}"),
+                Err(error) => println!("error: {error:?}"),
+            }
+            result // return result back to fifa var
+        });
+
+        let _ = tokio::join!(google, tesla, fifa);
     });
 }
