@@ -1,7 +1,7 @@
 Cargo.lock
-target/
+# target/
 *~
-book/
+# book/
 *.swp
 lines.txt
 .idea/
