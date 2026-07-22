@@ -1,10 +1,12 @@
 use i2cdev::core::*;
+use std::time::Duration;
 // NOTE:
 // add target to .cargo/config.toml
 // [build]
 // target = "aarch64-unknown-linux-gnu"
 // because I'm on Mac -> this to tell compiler this is meant for the linux on the pi
 use i2cdev::linux::{LinuxI2CDevice, LinuxI2CError};
+use std::thread;
 
 const RASBOT_I2C_ADDRESS: u16 = 0x2B;
 
@@ -67,12 +69,28 @@ fn main() -> Result<(), LinuxI2CError> {
     // give it to the bot struct
     let mut bot = Bot::new(RASBOT_I2C_ADDRESS, device);
 
-    // move wheel 0
-    bot.move_wheel_motor(MotorInfo {
-        id: MotorId::Zero,
-        direction: MotorDirection::Forward,
-        speed: 255,
-    })?;
+    // move all wheels
+    let motor_ids = [MotorId::Zero, MotorId::One, MotorId::Two, MotorId::Three];
+    for id in motor_ids {
+        bot.move_wheel_motor(MotorInfo {
+            id,
+            direction: MotorDirection::Forward,
+            speed: 255,
+        })?;
+    }
+
+    // run for about 10 seconds
+    thread::sleep(Duration::from_secs(10));
+
+    // stop all wheels
+    let motor_ids = [MotorId::Zero, MotorId::One, MotorId::Two, MotorId::Three];
+    for id in motor_ids {
+        bot.move_wheel_motor(MotorInfo {
+            id,
+            direction: MotorDirection::Backward,
+            speed: 0,
+        })?;
+    }
 
     Ok(())
 }
