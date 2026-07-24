@@ -159,5 +159,10 @@ fn main() -> Result<(), LinuxI2CError> {
     thread::sleep(Duration::from_secs(3));
     bot.stop_all_wheels()?;
 
+    // move bot left for 3 secs
+    bot.move_bot_left(255)?;
+    thread::sleep(Duration::from_secs(3));
+    bot.stop_all_wheels()?;
+
     Ok(())
 }

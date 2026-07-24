@@ -1,0 +1,12 @@
+sudo nmcli dev wifi connect "Roxy" password "2142072458"
+sudo nmcli dev status
+sudo nmcli -f NAME,autoconnect-priority con show
+sudo nmcli con mod "Roxy" connection.autoconnect-priority 5
+
+sudo nmcli device wifi list
+
+# Check LAN country
+sudo iw reg get
+
+# redo config and change LAN to US
+sudo raspi-config
