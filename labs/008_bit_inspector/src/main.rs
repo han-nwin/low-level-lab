@@ -239,11 +239,31 @@ fn reverse(hex: &str) -> Result<(), Box<dyn std::error::Error>> {
     // make it big endian then read as little endian = reversed
     let mut big_endian = u_32.to_be_bytes();
     // reverse inside each big endian byte
+    // for byte in big_endian.iter_mut() {
+    //     // NOTE: * turns byte into a mutable reference
+    //     *byte = byte.reverse_bits();
+    // }
+
+    // Our own reversed bit implementation
+    // read each bit and move it to the opposition position
+    let mut reversed_bit_big_endian: Vec<u8> = Vec::new();
     for byte in big_endian.iter_mut() {
-        // NOTE: * turns byte into a mutable reference
-        *byte = byte.reverse_bits();
+        let mut reverse: u8 = 0;
+
+        for position in 0..8 {
+            // read a bit
+            // NOTE: * turns byte into a mutable reference
+            let bit = (*byte >> position) & 1;
+            // move it to opposition position
+            let opposite = 7 - position;
+
+            // record that bit to the result
+            reverse |= bit << opposite;
+        }
+        reversed_bit_big_endian.push(reverse);
     }
-    let reversed = u32::from_le_bytes(big_endian);
+    let reversed = u32::from_le_bytes(reversed_bit_big_endian.try_into().unwrap()); // try_into
+    // turn Vec to array
 
     println!("Result: 0x{reversed:02X?}");
     Ok(())
