@@ -10,10 +10,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Inspect { value: String },
-    SetBit { value: String, position: u32 },
-    ClearBit { value: String, position: u32 },
-    ToggleBit { value: String, position: u32 },
-    TestBit { value: String, position: u32 },
+    SetBit { value: String, position: u8 },
+    ClearBit { value: String, position: u8 },
+    ToggleBit { value: String, position: u8 },
+    TestBit { value: String, position: u8 },
     Reverse { value: String },
     Swap { value: String },
 }
@@ -30,17 +30,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+fn is_hex(value: &str) -> bool {
+    // check if it's a hex
+    if !value.starts_with("0x") && !value.starts_with("0X") {
+        return false;
+    }
+    let hex_value = value.replace("0x", "").replace("0X", "");
+    if !hex_value.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+
+    true
+}
+
+fn is_valid_position(position: u8) -> bool {
+    // check if the position is valid
+    if position > 31 {
+        eprintln!("Position {} is out of range (0..=31)", position);
+        return false;
+    }
+    true
+}
+
 fn inspect(hex: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("Inspecting {}\n", hex);
 
-    // check if it's a hex
-    if !hex.starts_with("0x") && !hex.starts_with("0X") {
+    if !is_hex(hex) {
         return Err("Invalid hex value".into());
     }
-    let hex_value = hex.replace("0x", "").replace("0X", "");
-    if !hex_value.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("Invalid hex value {c}".into());
-    }
+    let hex_value = hex.replace("0x", "").replace("0X", ""); // remove the 0x or 0X
 
     println!("Hex: {}", hex);
 
@@ -95,32 +113,161 @@ fn inspect(hex: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn set_bit(value: &str, position: u32) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Setting bit {} in {}", position, value);
+// Example output for set_bit
+// set-bit 0x00 0
+// Expected: 0x01
+//
+// set-bit 0x08 1
+// Expected: 0x0A
+//
+// set-bit 0xF0 3
+// Expected: 0xF8
+fn set_bit(hex: &str, position: u8) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Setting bit {} in {}", position, hex);
+    if !is_hex(hex) {
+        return Err("Invalid hex value".into());
+    }
+    if !is_valid_position(position) {
+        return Err("Invalid position".into());
+    }
+
+    let u_32 = u32::from_str_radix(&hex.replace("0x", "").replace("0X", ""), 16)?; // 16 mean base 16 aka hex
+    let mask = 1 << position;
+
+    let result = u_32 | mask; // set the bit with the mask by ORing it with the mask
+    println!("Result: 0x{result:02X?}");
+
     Ok(())
 }
 
-fn clear_bit(value: &str, position: u32) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Clearing bit {} in {}", position, value);
+// Example output for clear_bit
+// clear-bit 0x00 0
+// Expected: 0x00
+//
+// clear-bit 0x07 1
+// Expected: 0x05
+//
+// clear-bit 0xF0 4
+// Expected: 0xE0
+fn clear_bit(hex: &str, position: u8) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Clearing bit {} in {}", position, hex);
+    if !is_hex(hex) {
+        return Err("Invalid hex value".into());
+    }
+    if !is_valid_position(position) {
+        return Err("Invalid position".into());
+    }
+
+    let u_32 = u32::from_str_radix(&hex.replace("0x", "").replace("0X", ""), 16)?; // 16 mean base 16 aka hex
+    let mask = !(1 << position);
+
+    let result = u_32 & mask; // clear the bit with the mask by ANDing it with the mask
+    println!("Result: 0x{result:02X?}");
+
     Ok(())
 }
 
-fn toggle_bit(value: &str, position: u32) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Toggling bit {} in {}", position, value);
+// toggle-bit 0x00 0
+// Expected: 0x01
+//
+// toggle-bit 0x0A 1
+// Expected: 0x08
+//
+// toggle-bit 0xF0 3
+// Expected: 0xF8
+fn toggle_bit(hex: &str, position: u8) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Toggling bit {} in {}", position, hex);
+    if !is_hex(hex) {
+        return Err("Invalid hex value".into());
+    }
+    if !is_valid_position(position) {
+        return Err("Invalid position".into());
+    }
+
+    let u_32 = u32::from_str_radix(&hex.replace("0x", "").replace("0X", ""), 16)?; // 16 mean base 16 aka hex
+    let mask = 1 << position;
+
+    let result = u_32 ^ mask; //toggle the bit with the mask by XORing it with the mask
+    println!("Result: 0x{result:02X?}");
+
     Ok(())
 }
 
-fn test_bit(value: &str, position: u32) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Testing bit {} in {}", position, value);
+// test-bit 0x01 0
+// Expected: true
+//
+// test-bit 0x0A 1
+// Expected: true
+//
+// test-bit 0xF0 3
+// Expected: false
+fn test_bit(hex: &str, position: u8) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Testing bit {} in {} if it's on", position, hex);
+    if !is_hex(hex) {
+        return Err("Invalid hex value".into());
+    }
+    if !is_valid_position(position) {
+        return Err("Invalid position".into());
+    }
+
+    let u_32 = u32::from_str_radix(&hex.replace("0x", "").replace("0X", ""), 16)?; // 16 mean base 16 aka hex
+    let mask = 1 << position;
+
+    let result = u_32 & mask; // test the bit with the mask by ANDing it with the mask
+    //
+    let result_tf = result != 0;
+    println!("Result: {result_tf}");
+
     Ok(())
 }
 
-fn reverse(value: &str) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Reversing {}", value);
+// reverse 0x00000001
+// Expected: 0x80000000
+//
+// reverse 0x0000000F
+// Expected: 0xF0000000
+//
+// reverse 0x12345678
+// Expected: 0x1E6A2C48
+fn reverse(hex: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Reversing {}", hex);
+    if !is_hex(hex) {
+        return Err("Invalid hex value".into());
+    }
+
+    let u_32 = u32::from_str_radix(&hex.replace("0x", "").replace("0X", ""), 16)?; // 16 mean base 16 aka hex
+    // make it big endian then read as little endian = reversed
+    let mut big_endian = u_32.to_be_bytes();
+    // reverse inside each big endian byte
+    for byte in big_endian.iter_mut() {
+        // NOTE: * turns byte into a mutable reference
+        *byte = byte.reverse_bits();
+    }
+    let reversed = u32::from_le_bytes(big_endian);
+
+    println!("Result: 0x{reversed:02X?}");
     Ok(())
 }
 
-fn swap(value: &str) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Swapping {}", value);
+//swap 0x12345678
+// Expected: 0x78563412
+//
+// swap 0xAABBCCDD
+// Expected: 0xDDCCBBAA
+//
+// swap 0x000000FF
+// Expected: 0xFF000000
+fn swap(hex: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Swapping {}", hex);
+    if !is_hex(hex) {
+        return Err("Invalid hex value".into());
+    }
+
+    let u_32 = u32::from_str_radix(&hex.replace("0x", "").replace("0X", ""), 16)?; // 16 mean base 16 aka hex
+    // make it big endian bytes then read backward, no need to flip inside each byte
+    let big_endian = u_32.to_be_bytes();
+    // reverse inside each big endian byte
+    let swapped = u32::from_le_bytes(big_endian);
+    println!("Result: 0x{swapped:02X?}");
     Ok(())
 }
