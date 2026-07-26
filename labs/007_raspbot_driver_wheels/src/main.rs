@@ -75,6 +75,11 @@ impl Bot {
         Ok(())
     }
 
+    // Wheels map
+    // 0 --head -- 2
+    // |           |
+    // 1-----------3
+
     fn move_bot_right(&mut self, speed: u8) -> Result<(), LinuxI2CError> {
         // 0 / 2 move up
         self.move_wheel_motor(MotorInfo {
@@ -104,7 +109,7 @@ impl Bot {
     }
 
     fn move_bot_left(&mut self, speed: u8) -> Result<(), LinuxI2CError> {
-        // 0 / 2 move back
+        // 0 / 3 move back
         self.move_wheel_motor(MotorInfo {
             id: MotorId::Zero,
             direction: MotorDirection::Backward,
@@ -116,7 +121,7 @@ impl Bot {
             speed,
         })?;
 
-        // 1 / 3 move up
+        // 1 / 2 move up
         self.move_wheel_motor(MotorInfo {
             id: MotorId::One,
             direction: MotorDirection::Forward,
@@ -124,6 +129,31 @@ impl Bot {
         })?;
         self.move_wheel_motor(MotorInfo {
             id: MotorId::Two,
+            direction: MotorDirection::Forward,
+            speed,
+        })?;
+
+        Ok(())
+    }
+
+    fn spin(&mut self, speed: u8) -> Result<(), LinuxI2CError> {
+        self.move_wheel_motor(MotorInfo {
+            id: MotorId::Zero,
+            direction: MotorDirection::Backward,
+            speed,
+        })?;
+        self.move_wheel_motor(MotorInfo {
+            id: MotorId::One,
+            direction: MotorDirection::Backward,
+            speed,
+        })?;
+        self.move_wheel_motor(MotorInfo {
+            id: MotorId::Two,
+            direction: MotorDirection::Forward,
+            speed,
+        })?;
+        self.move_wheel_motor(MotorInfo {
+            id: MotorId::Three,
             direction: MotorDirection::Forward,
             speed,
         })?;
@@ -138,21 +168,21 @@ fn main() -> Result<(), LinuxI2CError> {
     // give it to the bot struct
     let mut bot = Bot::new(RASBOT_I2C_ADDRESS, device);
 
-    // move all wheels
-    let motor_ids = [MotorId::Zero, MotorId::One, MotorId::Two, MotorId::Three];
-    for id in motor_ids {
-        bot.move_wheel_motor(MotorInfo {
-            id,
-            direction: MotorDirection::Forward,
-            speed: 255,
-        })?;
-    }
-
-    // run for about 10 seconds
-    thread::sleep(Duration::from_secs(10));
-
-    // stop all wheels
-    bot.stop_all_wheels()?;
+    // // move all wheels
+    // let motor_ids = [MotorId::Zero, MotorId::One, MotorId::Two, MotorId::Three];
+    // for id in motor_ids {
+    //     bot.move_wheel_motor(MotorInfo {
+    //         id,
+    //         direction: MotorDirection::Forward,
+    //         speed: 255,
+    //     })?;
+    // }
+    //
+    // // run for about 10 seconds
+    // thread::sleep(Duration::from_secs(10));
+    //
+    // // stop all wheels
+    // bot.stop_all_wheels()?;
 
     // move bot right for 3 secs
     bot.move_bot_right(255)?;
@@ -161,6 +191,11 @@ fn main() -> Result<(), LinuxI2CError> {
 
     // move bot left for 3 secs
     bot.move_bot_left(255)?;
+    thread::sleep(Duration::from_secs(3));
+    bot.stop_all_wheels()?;
+
+    // spin the bot for 3 seconds
+    bot.spin(100)?;
     thread::sleep(Duration::from_secs(3));
     bot.stop_all_wheels()?;
 
