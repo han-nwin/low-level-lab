@@ -9,7 +9,14 @@ Build a multithreaded Rust benchmark that proves three things:
 
 # Goal
 
-Create a program where two threads repeatedly increment separate counters.
+Create a program where two threads repeatedly increment separate counters inside one memory space (aka inside a struct).
+
+```
+struct Counter {
+  counter_a: usize,
+  counter_b: usize
+}
+```
 
 You will compare:
 
