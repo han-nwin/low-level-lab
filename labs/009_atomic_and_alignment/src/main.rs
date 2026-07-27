@@ -80,6 +80,10 @@ fn run_mutex(iterations: usize) {
     println!("Counter A: {}", counter.counter_a.lock().unwrap());
     println!("Counter B: {}", counter.counter_b.lock().unwrap());
     println!("Elapsed: {} milli seconds", time.elapsed().as_millis());
+    println!(
+        "Operations/second: {}",
+        iterations as f64 / time.elapsed().as_secs_f64()
+    );
 }
 
 fn run_atomic(iterations: usize) {
