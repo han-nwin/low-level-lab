@@ -7,6 +7,12 @@ Personal cheat sheet while learning Rust. Covers setup → first program → cor
 - The Book Local: `./book/book/index.html`
 - Rust Documentations List: `rustup doc`
 
+## Embedded Rust
+- The Embedded Rust Book: <https://docs.rust-embedded.org/book/>
+
+## Cookbook
+- The Rust Cookbook: <https://rust-lang-nursery.github.io/rust-cookbook/>
+
 ## Advanced
 - The Rust Reference: <https://doc.rust-lang.org/stable/reference/introduction.html>
 - Rust by Example: <https://doc.rust-lang.org/rust-by-example/>
