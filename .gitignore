@@ -1,6 +1,8 @@
 # Rust target/
 target/
 
+.cache/
+
 # Out-of-source build directories
 build/
 cmake-build-*/

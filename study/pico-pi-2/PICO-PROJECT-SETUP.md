@@ -172,8 +172,18 @@ where arm-none-eabi-gcc
 ## Run first cmake
 
 ```bash
-cmake -S . -B build \
-  -DPICO_TOOLCHAIN_PATH=/Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi
+  cmake -S . -B build-pico2-w \
+    -DPICO_BOARD=pico2_w \
+    -DPICO_TOOLCHAIN_PATH=/Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+```
+
+
+  To avoid typing the toolchain path every time, add this to ~/.zshrc or .bashrc et.c:
+
+```bash
+
+  export PICO_TOOLCHAIN_PATH=/Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi
 ```
 
 ## 4. Create the Compilation Database Symlink
@@ -181,7 +191,7 @@ cmake -S . -B build \
 This allows `clangd` and Neovim to find the generated compilation commands:
 
 ```bash
-ln -sfn build/compile_commands.json compile_commands.json
+ln -sfn build-pico2-w/compile_commands.json compile_commands.json
 ```
 
 ## 5. Build the Project
@@ -216,7 +226,10 @@ For every Pico project:
 ```bash
 cp pico_sdk_import.cmake .
 
-cmake -S . -B build
+cmake -S . -B build \
+  -DPICO_BOARD=pico2_w \
+  -DPICO_TOOLCHAIN_PATH=/Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
 ln -sfn build/compile_commands.json compile_commands.json
 
