@@ -11,8 +11,8 @@ struct Cli {
     // iterations: Option<usize>,
     #[command(subcommand)]
     command: Commands, //required
-    #[arg(short, long, default_value_t = 1_000_000, global = true)]
-    iterations: usize, // required global command
+    #[arg(short, long, default_value_t = 1_000_000, global = true)] // make this global
+    iterations: usize, // required global flag
 }
 
 #[derive(Subcommand)]
