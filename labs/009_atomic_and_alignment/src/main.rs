@@ -1,3 +1,10 @@
+// Performance summary:
+// 1. Aligned atomics are fastest because each counter sits on a separate cache line,
+//    avoiding false sharing and cache-line bouncing between CPU cores.
+// 2. Regular atomics are slower because adjacent counters may share one cache line,
+//    causing the cores to repeatedly fight over ownership of that line.
+// 3. A mutex is slowest because threads must lock, wait, update, and unlock,
+//    which serializes access and adds locking overhead.
 use clap::{Parser, Subcommand};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex}; // Arc = Atomic Rc = Atomic reference-counted
