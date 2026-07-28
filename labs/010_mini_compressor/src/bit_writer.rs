@@ -37,8 +37,8 @@ impl Writer {
         let mut bit_count = bit_count; // shadowing the input
         while free_bit_left_in_current_byte < bit_count {
             // just write the value from higher bit
-            // TODO: bug here
-            let mask = (masked_value << free_bit_left_in_current_byte) as u8;
+            // move all the bits needed to be written to the end
+            let mask = (masked_value >> (bit_count - free_bit_left_in_current_byte)) as u8;
             self.current_byte |= mask;
 
             //  because now num_bits_filled surely == 8
