@@ -181,7 +181,7 @@ fn run_aligned(iterations: usize) {
 
     let counter_2 = counter.clone();
     let handle_2 = thread::spawn(move || {
-        for _ in 1..iterations {
+        for _ in 1..=iterations {
             counter_2.counter_b.value.fetch_add(1, Ordering::Relaxed);
         }
     });
