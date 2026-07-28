@@ -39,6 +39,11 @@ struct MutexCounter {
     counter_a: Mutex<u64>,
     counter_b: Mutex<u64>,
 }
+// NOTE:
+// An atomic uses a special CPU instruction to safely update one value.
+// That value lives inside a cache line, usually a 64-byte memory block managed by the CPU cache.
+// A mutex uses atomics to let one thread own an entire critical section until it unlocks.
+
 // NOTE: Cache line:
 // Cpu cache the entire 64bytes nearby the memory it's accessing
 // even thought we asking for less than 64bytes (only 64bits 8bytes)
