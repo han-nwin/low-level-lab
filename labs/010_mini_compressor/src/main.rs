@@ -14,8 +14,8 @@ async fn main() -> anyhow::Result<()> {
     // TASK 2: Bitwriter BitReader
     //
     let mut writer = bit_writer::Writer::new();
-    writer.write(89, 8)?;
-    writer.write(10000, 8)?;
+    writer.write(65281, 16)?;
+    // writer.write(10000, 8)?;
     println!("writer.packed: {:?}", writer.packed);
 
     Ok(())

@@ -27,40 +27,54 @@ impl Writer {
             return Err(WriterError::InvalidBitCount(bit_count));
         }
 
-        let free_bit_left_in_current_byte = 8 - self.num_bits_filled;
-
         // mask the value first so only selected bits are visible
         let value_mask = (1 << bit_count) - 1;
         // if bit_count = 3 -> 1000 - 1 = 0111 -> exactly 3 bit visible
-
         let masked_value = value & value_mask;
 
-        if free_bit_left_in_current_byte >= bit_count {
-            // if there is enough space in current byte
-            // just write the value
-            // example:
-            // current = 11......
-            // filled = 2a
-            // value = .....1110011
-            // bit count = 3
-            // masked_value = 00000011
-            // then we shift the last 3 bit of masked_value to position 3 of current
-            // shift by 8-2-3 = 3 -> masked_value after shift 00011000 -> as u8
-            // current after mask now = 11011...
-            let mask = (masked_value << (free_bit_left_in_current_byte - bit_count)) as u8;
+        // write the bits and add packed values
+        let mut free_bit_left_in_current_byte = 8 - self.num_bits_filled;
+        let mut bit_count = bit_count; // shadowing the input
+        while free_bit_left_in_current_byte < bit_count {
+            // just write the value from higher bit
+            // TODO: bug here
+            let mask = (masked_value << free_bit_left_in_current_byte) as u8;
             self.current_byte |= mask;
-            self.num_bits_filled += bit_count;
 
-            if self.num_bits_filled == 8 {
-                // if we filled the current byte
-                // add it to the packed bytes
-                self.packed.push(self.current_byte);
-                // then reset the states
-                self.current_byte = 0;
-                self.num_bits_filled = 0;
-            }
-        } else {
-            // TODO: handle the case when there is not enough space in current byte
+            //  because now num_bits_filled surely == 8
+            // add it to the packed bytes
+            self.packed.push(self.current_byte);
+            // then reset the states
+            self.current_byte = 0;
+            self.num_bits_filled = 0;
+
+            bit_count -= free_bit_left_in_current_byte;
+            free_bit_left_in_current_byte = 8 - self.num_bits_filled;
+        }
+
+        // Wirte the left over bits
+        // example:
+        // current = 11......
+        // filled = 2a
+        // value = .....1110011
+        // bit count = 3
+        // masked_value = 00000011
+        // then we shift the last 3 bit of masked_value to position 3 of current
+        // shift by 8-2-3 = 3 -> masked_value after shift 00011000 -> as u8
+        // current after mask now = 11011...
+        let mask = (masked_value << (free_bit_left_in_current_byte - bit_count)) as u8;
+        // have to - bit_count here
+
+        self.current_byte |= mask;
+        self.num_bits_filled += bit_count;
+
+        if self.num_bits_filled == 8 {
+            // if we filled the current byte
+            // add it to the packed bytes
+            self.packed.push(self.current_byte);
+            // then reset the states
+            self.current_byte = 0;
+            self.num_bits_filled = 0;
         }
 
         Ok(())
