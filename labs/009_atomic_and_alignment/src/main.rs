@@ -39,6 +39,10 @@ struct MutexCounter {
     counter_a: Mutex<u64>,
     counter_b: Mutex<u64>,
 }
+// NOTE: Cache line:
+// Cpu cache the entire 64bytes nearby the memory it's accessing
+// even thought we asking for less than 64bytes (only 64bits 8bytes)
+// reason is because cpu predict we may access memory nearby it later
 
 // NOTE: One 64-byte cache line
 // ┌───────────────────────────────────────────────┐
