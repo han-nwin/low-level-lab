@@ -1,6 +1,14 @@
 [build]
+# Target is ARMv8-M main line (the architecture the cortex-m33 uses)
 target = "thumbv8m.main-none-eabihf"
 
 [target.thumbv8m.main-none-eabihf]
+rustflags = [
+  # [optional] Compiler optimizations
+  "-C", "target-cpu=cortex-m33", # target the cortex-m33 specifically
+
+  # Linker direction
+  "-C", "link-arg=-Tlink.x", # use link.x in cortex-m-rt to layout memory
+  "-C", "link-arg=--nmagic", # Prevent padding memory between sections to save space
+]
 linker = "rust-lld"
-rustflags = ["-C", "link-arg=-Tlink.x"]
