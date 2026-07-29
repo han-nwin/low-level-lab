@@ -23,12 +23,17 @@ impl Writer {
 
     pub fn write(&mut self, value: u64, bit_count: u8) -> Result<(), WriterError> {
         //check invalid bit count
-        if bit_count > 64 {
+        if bit_count > 64 || bit_count == 0 {
             return Err(WriterError::InvalidBitCount(bit_count));
         }
 
         // mask the value first so only selected bits are visible
-        let value_mask = (1 << bit_count) - 1;
+        // *prevent overflow
+        let value_mask = if bit_count == 64 {
+            u64::MAX // 1111111...1111
+        } else {
+            (1 << bit_count) - 1
+        };
         // if bit_count = 3 -> 1000 - 1 = 0111 -> exactly 3 bit visible
         let masked_value = value & value_mask;
 
@@ -80,9 +85,12 @@ impl Writer {
         Ok(())
     }
 
-    pub fn finalize(&mut self) {
+    /// Return a copy of writer.packed
+    pub fn finalize(&mut self) -> Result<Vec<u8>, WriterError> {
         self.packed.push(self.current_byte);
         self.num_bits_filled = 0;
+
+        Ok(self.packed.clone())
     }
 }
 
@@ -103,5 +111,28 @@ impl std::error::Error for WriterError {
             WriterError::Io(io_error) => Some(io_error),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_writer() -> Result<(), WriterError> {
+        let mut writer = Writer::new();
+        writer.write(9764609, 20)?; // 1001[0100 11111111 00000001]
+        assert_eq!(writer.packed, vec![79_u8, 240_u8]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_finalize() -> Result<(), WriterError> {
+        let mut writer = Writer::new();
+        writer.write(9764609, 20)?; // 1001[0100 11111111 00000001]
+        let packed = writer.finalize()?;
+        assert_eq!(packed, vec![79_u8, 240_u8, 16_u8]);
+
+        Ok(())
     }
 }

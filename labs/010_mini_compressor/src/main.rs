@@ -6,7 +6,7 @@ async fn main() -> anyhow::Result<()> {
     // == TASK 1
     // read to a Vec<u8>
     let content = tokio::fs::read("image.jpeg").await?;
-    println!("Data Length: {}", &content.len());
+    println!("Data Length: {}", content.len());
 
     // write to file
     // tokio::fs::write("out.jpeg", content).await?;
@@ -18,8 +18,8 @@ async fn main() -> anyhow::Result<()> {
     // writer.write(10000, 8)?;
     println!("writer.packed: {:?}", writer.packed);
 
-    writer.finalize();
-    println!("After finalize: writer.packed: {:?}", writer.packed);
+    let packed = writer.finalize()?;
+    println!("After finalize: writer.packed: {:?}", packed);
 
     Ok(())
 }
