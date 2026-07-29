@@ -79,6 +79,11 @@ impl Writer {
 
         Ok(())
     }
+
+    pub fn finalize(&mut self) {
+        self.packed.push(self.current_byte);
+        self.num_bits_filled = 0;
+    }
 }
 
 impl std::fmt::Display for WriterError {
