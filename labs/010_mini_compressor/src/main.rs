@@ -1,3 +1,4 @@
+mod bit_reader;
 mod bit_writer;
 use std::io;
 
