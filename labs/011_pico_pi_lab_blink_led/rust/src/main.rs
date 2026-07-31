@@ -71,6 +71,19 @@ fn main() -> ! {
         {}
 
         // 4. Configure GP16
+        // IO_BANK
+        // To allocate a function to a GPIO, write to the FUNCSEL
+        // field in the CTRL register corresponding to the pin.
+        // In this case, we give SIO function -> F5
+        core::ptr::write_volatile(GPIO16_CTRL, 0x05_u32);
+
+        // PAD_BANK
+        // Datasheet said:
+        // Bit 8: ISO Pad isolation control.
+        // Remove this once the pad is configured by software.
+        let pad_value = core::ptr::read_volatile(GPIO16_PAD);
+        let new_pad_value = pad_value & !((1 << 8) as u32); // remove 8th bit
+        core::ptr::write_volatile(GPIO16_PAD, new_pad_value);
     };
 
     loop {}
