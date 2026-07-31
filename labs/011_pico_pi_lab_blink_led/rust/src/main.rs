@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use cortex_m_rt::entry;
+use cortex_m_rt::entry; // this is the runtime for the mcu
 use panic_halt as _;
 
 #[entry]
@@ -24,7 +24,7 @@ fn main() -> ! {
     const RESETS_WDSEL: *mut u32 = 0x4002_0004 as *mut u32;
     const RESETS_RESET_DONE: *const u32 = 0x4002_0008 as *const u32; //read only
 
-    // NOTE:   GPIO passes through two major pieces of hardware:
+    // NOTE: GPIO passes through two major pieces of hardware:
     // SIO signal
     //    ↓
     // IO_BANK0        selects what controls GP16
@@ -33,12 +33,24 @@ fn main() -> ! {
     //    ↓
     // GP16
     // Therefore, we need to reset IO_BANK0 and PADS_BANK0
-    const IO_BANK0_BIT: u32 = 0x0000_0040 as u32;
+    const IO_BANK0_BIT: u32 = 0x0000_0040_u32;
     // const IO_BANK0_MASK: u32 = (1 << 6) as u32; // bit 6
-    const PADS_BANK0_BIT: u32 = 0x0000_0200 as u32;
+    const PADS_BANK0_BIT: u32 = 0x0000_0200_u32;
     // const PADS_BANK0_BIT: u32 = (1 << 9) as u32; // bit 9
 
-    // NOTE: GP16 PIN constants
+    // NOTE: Route to GPIO 16
+    // SIO -> IO_BANK -> PADS_BANK -> GPIO16
+    const SIO_BASE: *mut u32 = 0xD000_0000 as *mut u32;
+    const IO_BANK0_BASE: u32 = 0x4002_8000_u32;
+    const PAD_BANK0_BASE: u32 = 0x4003_8000_u32;
+    // now tell IO_BANK what peripheral connected to the pin (it's the GPIO16)
+    const GPIO16_STATUS_OFFSET: u32 = 0x080_u32;
+    const GPIO16_CTRL_OFFSET: u32 = 0x084_u32;
+    const GPIO16_STATUS: *mut u32 = (IO_BANK0_BASE + GPIO16_STATUS_OFFSET) as *mut u32;
+    const GPIO16_CTRL: *mut u32 = (IO_BANK0_BASE + GPIO16_CTRL_OFFSET) as *mut u32;
+    // now define electrical behavior with pad bank
+    const GPIO16_PAD_OFFSET: u32 = 0x0000_0044_u32;
+    const GPIO16_PAD: *mut u32 = (PAD_BANK0_BASE + GPIO16_PAD_OFFSET) as *mut u32;
 
     unsafe {
         // 1. Reset IO_BANK0 and PADS_BANK0
@@ -59,16 +71,6 @@ fn main() -> ! {
         {}
 
         // 4. Configure GP16
-
-        // IO BANK == //
-        const IO_BANK0_BASE = 0x4002_8000_u32;
-        const GPIO16_CTRL_OFFSET = 0x0000_0084_u32;
-        //  GPIO16 CONTROL becomes:
-        const GPIO16_CTRL: u32 = IO_BANK0_BASE + GPIO16_CTRL_OFFSET;
-
-        // PAD === //
-        const PAD_BANK0_BASE = 0x4003_8000_u32;
-        const GPIO16_PAD_OFFSET = 0x0000_0044_u32;
     };
 
     loop {}
