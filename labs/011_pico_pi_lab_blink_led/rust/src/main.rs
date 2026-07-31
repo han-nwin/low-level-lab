@@ -40,9 +40,17 @@ fn main() -> ! {
 
     // NOTE: Route to GPIO 16
     // SIO -> IO_BANK -> PADS_BANK -> GPIO16
-    const SIO_BASE: *mut u32 = 0xD000_0000 as *mut u32;
+    const SIO_BASE: u32 = 0xD000_0000_u32;
     const IO_BANK0_BASE: u32 = 0x4002_8000_u32;
     const PAD_BANK0_BASE: u32 = 0x4003_8000_u32;
+
+    // now define SIO
+    const GPIO_OE_SET_OFFSET: u32 = 0x038_u32; // enable the pin as output, can use GPIO_OE but it will reset other pins
+    const GPIO_OUT_SET_OFFSET: u32 = 0x018_u32; // use this bit to set it high
+    const GPIO_OUT_CLR_OFFSET: u32 = 0x020_u32; // this use to clear the bit -> set low
+    const GPIO_OE_SET: *mut u32 = (SIO_BASE + GPIO_OE_SET_OFFSET) as *mut u32;
+    const GPIO_OUT_SET: *mut u32 = (SIO_BASE + GPIO_OUT_SET_OFFSET) as *mut u32;
+    const GPIO_OUT_CLR: *mut u32 = (SIO_BASE + GPIO_OUT_CLR_OFFSET) as *mut u32;
     // now tell IO_BANK what peripheral connected to the pin (it's the GPIO16)
     const GPIO16_STATUS_OFFSET: u32 = 0x080_u32;
     const GPIO16_CTRL_OFFSET: u32 = 0x084_u32;
@@ -51,6 +59,9 @@ fn main() -> ! {
     // now define electrical behavior with pad bank
     const GPIO16_PAD_OFFSET: u32 = 0x0000_0044_u32;
     const GPIO16_PAD: *mut u32 = (PAD_BANK0_BASE + GPIO16_PAD_OFFSET) as *mut u32;
+    const PAD_ISO_BIT: u32 = 1 << 8; // ISO bit -> need clear
+    const PAD_OD_BIT: u32 = 1 << 7; // this is output disable bit -> need clear
+    const PAD_IE_BIT: u32 = 1 << 6; // input enable bit -> (optional)need set
 
     unsafe {
         // 1. Reset IO_BANK0 and PADS_BANK0
@@ -71,20 +82,41 @@ fn main() -> ! {
         {}
 
         // 4. Configure GP16
-        // IO_BANK
+        // 4.1 IO_BANK
         // To allocate a function to a GPIO, write to the FUNCSEL
         // field in the CTRL register corresponding to the pin.
         // In this case, we give SIO function -> F5
         core::ptr::write_volatile(GPIO16_CTRL, 0x05_u32);
 
-        // PAD_BANK
+        // 4.2 PAD_BANK
         // Datasheet said:
         // Bit 8: ISO Pad isolation control.
         // Remove this once the pad is configured by software.
         let pad_value = core::ptr::read_volatile(GPIO16_PAD);
-        let new_pad_value = pad_value & !((1 << 8) as u32); // remove 8th bit
+        let new_pad_value = (pad_value & !(PAD_ISO_BIT | PAD_OD_BIT)) | PAD_IE_BIT; // remove 8th | 7th bits and set 6th bit
         core::ptr::write_volatile(GPIO16_PAD, new_pad_value);
-    };
 
-    loop {}
+        // 4.3 SIO - set the bit high low
+        core::ptr::write_volatile(GPIO_OE_SET, PIN_MASK); // make it and output
+        core::ptr::write_volatile(GPIO_OUT_CLR, PIN_MASK); // clear first
+        loop {
+            core::ptr::write_volatile(GPIO_OUT_SET, PIN_MASK); // set high
+
+            // delay a bit
+            for _ in 0..100_000 {
+                //  keep this loop and issue the
+                // > architecture’s spin-wait instruction.
+                core::hint::spin_loop();
+            }
+
+            core::ptr::write_volatile(GPIO_OUT_CLR, PIN_MASK); // clear
+
+            // delay a bit
+            for _ in 0..100_000 {
+                //  keep this loop and issue the
+                // > architecture’s spin-wait instruction.
+                core::hint::spin_loop();
+            }
+        }
+    };
 }
