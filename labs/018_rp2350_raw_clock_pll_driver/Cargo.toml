@@ -1,0 +1,6 @@
+[package]
+name = "rp2350_raw_clock_pll_driver"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
