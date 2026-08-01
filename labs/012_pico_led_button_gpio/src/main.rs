@@ -19,25 +19,14 @@ static IMAGE_DEF: [u32; 5] = [
 #[entry]
 fn main() -> ! {
     const LED_PIN_MASK: u32 = 1 << 16;
-    const BUTTON_PIN_MASK: u32 = 1 << 15;
 
-    // NOTE: RP2350 reset controller
-    // RESET       32 bits = 4 bytes → offset 0x00
-    // WDSEL       32 bits = 4 bytes → offset 0x04
-    // RESET_DONE  32 bits = 4 bytes → offset 0x08
-    //                  one 32-bit value
-    //         ┌───────────────────────────┐
-    // 0x2000  │ byte 0 │ 8 bits           │
-    // 0x2001  │ byte 1 │ 8 bits           │
-    // 0x2002  │ byte 2 │ 8 bits           │
-    // 0x2003  │ byte 3 │ 8 bits           │
-    //         └───────────────────────────┘
+    // RP2350 reset controller
     // This is the reset engine, we mask it with what we wanna reset
     const RESETS_RESET: *mut u32 = 0x4002_0000 as *mut u32;
     const RESETS_WDSEL: *mut u32 = 0x4002_0004 as *mut u32;
     const RESETS_RESET_DONE: *const u32 = 0x4002_0008 as *const u32; //read only
 
-    // NOTE: GPIO passes through two major pieces of hardware:
+    // GPIO passes through two major pieces of hardware:
     // SIO signal
     //    ↓
     // IO_BANK0        selects what controls GP16
@@ -51,7 +40,7 @@ fn main() -> ! {
     const PADS_BANK0_BIT: u32 = 0x0000_0200_u32;
     // const PADS_BANK0_BIT: u32 = (1 << 9) as u32; // bit 9
 
-    // NOTE: Route to GPIO 16
+    // Route to GPIO 16
     // SIO -> IO_BANK -> PADS_BANK -> GPIO16
     const SIO_BASE: u32 = 0xD000_0000_u32;
     const IO_BANK0_BASE: u32 = 0x4002_8000_u32;
@@ -78,12 +67,11 @@ fn main() -> ! {
 
     unsafe {
         // 1. Reset IO_BANK0 and PADS_BANK0
-        // Hardware power-on usually already do this but this is for learning
+        // optional
         let reset = core::ptr::read_volatile(RESETS_RESET);
         core::ptr::write_volatile(RESETS_RESET, reset | IO_BANK0_BIT | PADS_BANK0_BIT);
 
         // 2. Release the reset: clear IO_BANK0 and PADS_BANK0
-        // clear bit use & !
         // we have to do this even if we don't do step 1
         let reset = core::ptr::read_volatile(RESETS_RESET);
         core::ptr::write_volatile(RESETS_RESET, reset & !IO_BANK0_BIT & !PADS_BANK0_BIT);
@@ -96,15 +84,10 @@ fn main() -> ! {
 
         // 4. Configure GP16
         // 4.1 IO_BANK
-        // To allocate a function to a GPIO, write to the FUNCSEL
-        // field in the CTRL register corresponding to the pin.
-        // In this case, we give SIO function -> F5
+        // SIO = FUNCSEL 5
         core::ptr::write_volatile(GPIO16_CTRL, 0x05_u32);
 
         // 4.2 PAD_BANK
-        // Datasheet said:
-        // Bit 8: ISO Pad isolation control.
-        // Remove this once the pad is configured by software.
         let pad_value = core::ptr::read_volatile(GPIO16_PAD);
         let new_pad_value = (pad_value & !(PAD_ISO_BIT | PAD_OD_BIT)) | PAD_IE_BIT; // remove 8th | 7th bits and set 6th bit
         core::ptr::write_volatile(GPIO16_PAD, new_pad_value);
@@ -115,22 +98,13 @@ fn main() -> ! {
         loop {
             core::ptr::write_volatile(GPIO_OUT_SET, LED_PIN_MASK); // set high
 
-            // delay a bit
-            // each spin_loop() cost some cpu cycle
-            // if the mcu speed is 15Mhz and a spin takes 4 cycle
-            // 1000000 iteration will take about 4/15000000 = 0.27 sec
             for _ in 0..1000_000 {
-                //  keep this loop and issue the
-                // > architecture’s spin-wait instruction.
                 core::hint::spin_loop();
             }
 
             core::ptr::write_volatile(GPIO_OUT_CLR, LED_PIN_MASK); // clear
 
-            // delay a bit
             for _ in 0..1000_000 {
-                //  keep this loop and issue the
-                // > architecture’s spin-wait instruction.
                 core::hint::spin_loop();
             }
         }
