@@ -11,4 +11,5 @@ rustflags = [
   "-C", "link-arg=-Tlink.x", # use link.x in cortex-m-rt to layout memory
   "-C", "link-arg=--nmagic", # Prevent padding memory between sections to save space
 ]
+
 linker = "rust-lld"

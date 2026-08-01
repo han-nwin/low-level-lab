@@ -4,6 +4,21 @@
 use cortex_m_rt::entry; // this is the runtime for the mcu
 use panic_halt as _;
 
+#[used] // tell compiler to use the block below
+#[unsafe(link_section = ".start_block")]
+static IMAGE_DEF: [u32; 5] = [
+    // this is the MCU metadata
+    0xffff_ded3, // Start marker: tells the Boot ROM an RP2350 metadata block begins here
+    0x1021_0142, // Image type: executable Secure Arm code for the RP2350
+    0x0000_01ff, // Last-item marker: there are no more metadata items in this block
+    0x0000_0000, // Next-block relative offset: 0 makes this single block link to itself
+    0xab12_3579, // End marker: tells the Boot ROM the metadata block ends here
+]; // This is RP235x-defined metadata
+// #[used]           : compiler must retain it
+// #[link_section]   : put it in .start_block
+// memory.x          : tell the linker to place .start_block within first 4 KiB
+// Boot ROM          : find, validate, and interpret it
+
 #[entry]
 fn main() -> ! {
     const PIN_MASK: u32 = 1 << 16;
@@ -103,7 +118,10 @@ fn main() -> ! {
             core::ptr::write_volatile(GPIO_OUT_SET, PIN_MASK); // set high
 
             // delay a bit
-            for _ in 0..100_000 {
+            // each spin_loop() cost some cpu cycle
+            // if the mcu speed is 15Mhz and a spin takes 4 cycle
+            // 1000000 iteration will take about 4/15000000 = 0.27 sec
+            for _ in 0..1000_000 {
                 //  keep this loop and issue the
                 // > architecture’s spin-wait instruction.
                 core::hint::spin_loop();
@@ -112,7 +130,7 @@ fn main() -> ! {
             core::ptr::write_volatile(GPIO_OUT_CLR, PIN_MASK); // clear
 
             // delay a bit
-            for _ in 0..100_000 {
+            for _ in 0..1000_000 {
                 //  keep this loop and issue the
                 // > architecture’s spin-wait instruction.
                 core::hint::spin_loop();
