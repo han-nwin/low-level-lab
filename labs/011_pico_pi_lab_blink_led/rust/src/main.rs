@@ -7,7 +7,9 @@ use panic_halt as _;
 #[used] // tell compiler to use the block below
 #[unsafe(link_section = ".start_block")]
 static IMAGE_DEF: [u32; 5] = [
-    // this is the MCU metadata
+    // NOTE:
+    // this is the RP2350 metadata
+    // in datasheet: 5.9.5.1. Minimum Arm IMAGE_DEF
     0xffff_ded3, // Start marker: tells the Boot ROM an RP2350 metadata block begins here
     0x1021_0142, // Image type: executable Secure Arm code for the RP2350
     0x0000_01ff, // Last-item marker: there are no more metadata items in this block
