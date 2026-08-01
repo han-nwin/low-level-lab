@@ -18,7 +18,8 @@ static IMAGE_DEF: [u32; 5] = [
 
 #[entry]
 fn main() -> ! {
-    const PIN_MASK: u32 = 1 << 16;
+    const LED_PIN_MASK: u32 = 1 << 16;
+    const BUTTON_PIN_MASK: u32 = 1 << 15;
 
     // NOTE: RP2350 reset controller
     // RESET       32 bits = 4 bytes → offset 0x00
@@ -109,10 +110,10 @@ fn main() -> ! {
         core::ptr::write_volatile(GPIO16_PAD, new_pad_value);
 
         // 4.3 SIO - set the bit high low
-        core::ptr::write_volatile(GPIO_OE_SET, PIN_MASK); // make it and output
-        core::ptr::write_volatile(GPIO_OUT_CLR, PIN_MASK); // clear first
+        core::ptr::write_volatile(GPIO_OE_SET, LED_PIN_MASK); // make it and output
+        core::ptr::write_volatile(GPIO_OUT_CLR, LED_PIN_MASK); // clear first
         loop {
-            core::ptr::write_volatile(GPIO_OUT_SET, PIN_MASK); // set high
+            core::ptr::write_volatile(GPIO_OUT_SET, LED_PIN_MASK); // set high
 
             // delay a bit
             // each spin_loop() cost some cpu cycle
@@ -124,7 +125,7 @@ fn main() -> ! {
                 core::hint::spin_loop();
             }
 
-            core::ptr::write_volatile(GPIO_OUT_CLR, PIN_MASK); // clear
+            core::ptr::write_volatile(GPIO_OUT_CLR, LED_PIN_MASK); // clear
 
             // delay a bit
             for _ in 0..1000_000 {
