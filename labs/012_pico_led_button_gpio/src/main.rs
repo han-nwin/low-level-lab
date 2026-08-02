@@ -156,17 +156,19 @@ fn main() -> ! {
         core::ptr::write_volatile(GPIO_OUT_CLR, LED_PIN_MASK); // clear first
 
         let mut blink_enabled = false;
-        // Main working loop
+        let mut led_on = false;
+        let mut led_state_counter = 0_u32;
+
+        // NOTE: Each loop here handle both led on/off and button pressed
         loop {
-            // - Pressed → GP15 reads 0
-            // - Released → GP15 reads 1
+            // Pull-up configuration: pressed means GP15 reads 0.
             let button_pressed = (core::ptr::read_volatile(GPIO_IN) & BUTTON_PIN_MASK) == 0;
 
             if button_pressed {
-                blink_enabled = !blink_enabled; //toggle
+                blink_enabled = !blink_enabled;
+                led_state_counter = 0;
 
-                // wait till user release the button
-                // aka wait while read still = 0
+                // Wait until the button is released.
                 while (core::ptr::read_volatile(GPIO_IN) & BUTTON_PIN_MASK) == 0 {
                     core::hint::spin_loop();
                 }
@@ -176,19 +178,38 @@ fn main() -> ! {
                 //
                 // Real release:
                 // 0000000101011111
-                //        |-bouncing -|
-                // simple release debounce
-                // wait for it to stable a bit
+                //        |- bouncing -|
+                // Simple release debounce.
                 for _ in 0..100_000 {
                     core::hint::spin_loop();
                 }
+
+                led_on = blink_enabled;
+
+                if led_on {
+                    core::ptr::write_volatile(GPIO_OUT_SET, LED_PIN_MASK);
+                } else {
+                    core::ptr::write_volatile(GPIO_OUT_CLR, LED_PIN_MASK);
+                }
             }
 
+            // we iterate through the counter to turn the led on/off -> blinky
             if blink_enabled {
-                core::ptr::write_volatile(GPIO_OUT_SET, LED_PIN_MASK); // set high
-            } else {
-                core::ptr::write_volatile(GPIO_OUT_CLR, LED_PIN_MASK); // clear
+                led_state_counter += 1;
+                // the speed between each on/off
+                if led_state_counter > 50_000 {
+                    led_on = !led_on;
+                    led_state_counter = 0;
+                }
+
+                if led_on {
+                    core::ptr::write_volatile(GPIO_OUT_SET, LED_PIN_MASK);
+                } else {
+                    core::ptr::write_volatile(GPIO_OUT_CLR, LED_PIN_MASK);
+                }
             }
+
+            core::hint::spin_loop();
         }
     };
 }
