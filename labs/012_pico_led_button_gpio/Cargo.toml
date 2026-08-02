@@ -1,5 +1,5 @@
 [package]
-name = "led_button_gpio_uart"
+name = "led_button_gpio"
 version = "0.1.0"
 edition = "2024"
 

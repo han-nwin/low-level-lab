@@ -143,7 +143,7 @@ fn main() -> ! {
             // each spin_loop() cost some cpu cycle
             // if the mcu speed is 15Mhz and a spin takes 4 cycle
             // 1000000 iteration will take about 4/15000000 = 0.27 sec
-            for _ in 0..1000_000 {
+            for _ in 0..1_000_000 {
                 //  keep this loop and issue the
                 // > architecture’s spin-wait instruction.
                 core::hint::spin_loop();
@@ -152,7 +152,7 @@ fn main() -> ! {
             core::ptr::write_volatile(GPIO_OUT_CLR, PIN_MASK); // clear
 
             // delay a bit
-            for _ in 0..1000_000 {
+            for _ in 0..1_000_000 {
                 //  keep this loop and issue the
                 // > architecture’s spin-wait instruction.
                 core::hint::spin_loop();

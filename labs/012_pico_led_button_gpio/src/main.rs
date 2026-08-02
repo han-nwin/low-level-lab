@@ -4,6 +4,16 @@
 use cortex_m_rt::entry;
 use panic_halt as _;
 
+// Keep a predictable field order and C-compatible memory layout.
+#[repr(C)]
+struct MyMetadata {
+    magic: [u8; 12], // 12 bytes
+    name: u32,
+    version: u32,
+    led_pin: u32,
+    button_pin: u32,
+}
+
 #[used]
 #[unsafe(link_section = ".start_block")]
 static IMAGE_DEF: [u32; 5] = [
@@ -16,9 +26,21 @@ static IMAGE_DEF: [u32; 5] = [
     0xab12_3579, // End marker: tells the Boot ROM the metadata block ends here
 ];
 
+// Custom meta data
+#[used]
+#[unsafe(link_section = ".my_metadata")]
+static MY_METADATA: MyMetadata = MyMetadata {
+    magic: *b"Han Dep Trai",
+    name: u32::from_le_bytes(*b" HEY"), // pico is little-endian
+    version: 1,
+    led_pin: 16,
+    button_pin: 15,
+};
+
 #[entry]
 fn main() -> ! {
     const LED_PIN_MASK: u32 = 1 << 16;
+    const BUTTON_PIN_MASK: u32 = 1 << 15;
 
     // RP2350 reset controller
     // This is the reset engine, we mask it with what we wanna reset
@@ -33,8 +55,10 @@ fn main() -> ! {
     //    ↓
     // PADS_BANK0      controls the physical/electrical pin
     //    ↓
-    // GP16
-    // Therefore, we need to reset IO_BANK0 and PADS_BANK0
+    // GP PINS
+
+    // NOTE: SHARED Config
+    // We need to reset IO_BANK0 and PADS_BANK0
     const IO_BANK0_BIT: u32 = 0x0000_0040_u32;
     // const IO_BANK0_MASK: u32 = (1 << 6) as u32; // bit 6
     const PADS_BANK0_BIT: u32 = 0x0000_0200_u32;
@@ -43,27 +67,51 @@ fn main() -> ! {
     // Route to GPIO 16
     // SIO -> IO_BANK -> PADS_BANK -> GPIO16
     const SIO_BASE: u32 = 0xD000_0000_u32;
-    const IO_BANK0_BASE: u32 = 0x4002_8000_u32;
-    const PAD_BANK0_BASE: u32 = 0x4003_8000_u32;
 
     // now define SIO
+    // output Pin
     const GPIO_OE_SET_OFFSET: u32 = 0x038_u32; // enable the pin as output, can use GPIO_OE but it will reset other pins
     const GPIO_OUT_SET_OFFSET: u32 = 0x018_u32; // use this bit to set it high
     const GPIO_OUT_CLR_OFFSET: u32 = 0x020_u32; // this use to clear the bit -> set low
     const GPIO_OE_SET: *mut u32 = (SIO_BASE + GPIO_OE_SET_OFFSET) as *mut u32;
     const GPIO_OUT_SET: *mut u32 = (SIO_BASE + GPIO_OUT_SET_OFFSET) as *mut u32;
     const GPIO_OUT_CLR: *mut u32 = (SIO_BASE + GPIO_OUT_CLR_OFFSET) as *mut u32;
+    // input Pin
+    const GPIO_IN_OFFSET: u32 = 0x004_u32; // enable the pin as input
+    const GPIO_IN: *const u32 = (SIO_BASE + GPIO_IN_OFFSET) as *const u32; // input is readonly
+
+    // Share Pad config
+    const PAD_ISO_BIT: u32 = 1 << 8; // ISO bit -> need clear
+    const PAD_OD_BIT: u32 = 1 << 7; // this is output disable bit
+    const PAD_IE_BIT: u32 = 1 << 6; // input enable bit
+    const PAD_PUE_BIT: u32 = 1 << 3; // pull up enable bi
+    const PAD_PDE_BIT: u32 = 1 << 2; // pull down enable bit
+    // END Share config
+
+    const IO_BANK0_BASE: u32 = 0x4002_8000_u32;
+    const PAD_BANK0_BASE: u32 = 0x4003_8000_u32;
+
+    // Datasheet: 9.11 Registers table
+    // NOTE: GP16 Config Constants
     // now tell IO_BANK what peripheral connected to the pin (it's the GPIO16)
     const GPIO16_STATUS_OFFSET: u32 = 0x080_u32;
     const GPIO16_CTRL_OFFSET: u32 = 0x084_u32;
-    const GPIO16_STATUS: *mut u32 = (IO_BANK0_BASE + GPIO16_STATUS_OFFSET) as *mut u32;
+    const GPIO16_STATUS: *const u32 = (IO_BANK0_BASE + GPIO16_STATUS_OFFSET) as *const u32;
     const GPIO16_CTRL: *mut u32 = (IO_BANK0_BASE + GPIO16_CTRL_OFFSET) as *mut u32;
     // now define electrical behavior with pad bank
     const GPIO16_PAD_OFFSET: u32 = 0x0000_0044_u32;
     const GPIO16_PAD: *mut u32 = (PAD_BANK0_BASE + GPIO16_PAD_OFFSET) as *mut u32;
-    const PAD_ISO_BIT: u32 = 1 << 8; // ISO bit -> need clear
-    const PAD_OD_BIT: u32 = 1 << 7; // this is output disable bit -> need clear
-    const PAD_IE_BIT: u32 = 1 << 6; // input enable bit -> (optional)need set
+    // End GP16 Config Constans
+
+    // NOTE: GP15 Config Constant
+    const GPIO15_STATUS_OFFSET: u32 = 0x078_u32;
+    const GPIO15_CTRL_OFFSET: u32 = 0x07c_u32;
+    const GPIO15_STATUS: *const u32 = (IO_BANK0_BASE + GPIO15_STATUS_OFFSET) as *const u32; //RO
+    const GPIO15_CTRL: *mut u32 = (IO_BANK0_BASE + GPIO15_CTRL_OFFSET) as *mut u32;
+    // now define electrical behavior with pad bank
+    const GPIO15_PAD_OFFSET: u32 = 0x0000_0040_u32;
+    const GPIO15_PAD: *mut u32 = (PAD_BANK0_BASE + GPIO15_PAD_OFFSET) as *mut u32;
+    // End GP15 Config Constans
 
     unsafe {
         // 1. Reset IO_BANK0 and PADS_BANK0
@@ -86,26 +134,60 @@ fn main() -> ! {
         // 4.1 IO_BANK
         // SIO = FUNCSEL 5
         core::ptr::write_volatile(GPIO16_CTRL, 0x05_u32);
+        core::ptr::write_volatile(GPIO15_CTRL, 0x05_u32);
 
         // 4.2 PAD_BANK
-        let pad_value = core::ptr::read_volatile(GPIO16_PAD);
-        let new_pad_value = (pad_value & !(PAD_ISO_BIT | PAD_OD_BIT)) | PAD_IE_BIT; // remove 8th | 7th bits and set 6th bit
-        core::ptr::write_volatile(GPIO16_PAD, new_pad_value);
+        let output_pad_value = core::ptr::read_volatile(GPIO16_PAD);
+        let new_output_pad_value = (output_pad_value & !(PAD_ISO_BIT | PAD_OD_BIT)) | PAD_IE_BIT; // remove 8th | 7th bits and set 6th bit
+        core::ptr::write_volatile(GPIO16_PAD, new_output_pad_value);
+
+        let input_pad_value = core::ptr::read_volatile(GPIO15_PAD);
+        // Configure GP15 as an input with an internal pull-up:
+        // - When the button is released, the pull-up holds GP15 at 3.3 V (reads 1).
+        // - When the button connects GP15 to GND, GP15 reads 0.
+        // Clear ISO and pull-down; enable input and pull-up.
+        let new_input_pad_value =
+            (input_pad_value & !(PAD_ISO_BIT | PAD_PDE_BIT)) | PAD_IE_BIT | PAD_PUE_BIT; // remove 8th | 2th bits and set 6th | 3th bits
+        core::ptr::write_volatile(GPIO15_PAD, new_input_pad_value);
 
         // 4.3 SIO - set the bit high low
+        // led
         core::ptr::write_volatile(GPIO_OE_SET, LED_PIN_MASK); // make it and output
         core::ptr::write_volatile(GPIO_OUT_CLR, LED_PIN_MASK); // clear first
-        loop {
-            core::ptr::write_volatile(GPIO_OUT_SET, LED_PIN_MASK); // set high
 
-            for _ in 0..1000_000 {
-                core::hint::spin_loop();
+        let mut blink_enabled = false;
+        // Main working loop
+        loop {
+            // - Pressed → GP15 reads 0
+            // - Released → GP15 reads 1
+            let button_pressed = (core::ptr::read_volatile(GPIO_IN) & BUTTON_PIN_MASK) == 0;
+
+            if button_pressed {
+                blink_enabled = !blink_enabled; //toggle
+
+                // wait till user release the button
+                // aka wait while read still = 0
+                while (core::ptr::read_volatile(GPIO_IN) & BUTTON_PIN_MASK) == 0 {
+                    core::hint::spin_loop();
+                }
+
+                // Ideal release:
+                // 0000000011111111
+                //
+                // Real release:
+                // 0000000101011111
+                //        |-bouncing -|
+                // simple release debounce
+                // wait for it to stable a bit
+                for _ in 0..100_000 {
+                    core::hint::spin_loop();
+                }
             }
 
-            core::ptr::write_volatile(GPIO_OUT_CLR, LED_PIN_MASK); // clear
-
-            for _ in 0..1000_000 {
-                core::hint::spin_loop();
+            if blink_enabled {
+                core::ptr::write_volatile(GPIO_OUT_SET, LED_PIN_MASK); // set high
+            } else {
+                core::ptr::write_volatile(GPIO_OUT_CLR, LED_PIN_MASK); // clear
             }
         }
     };
