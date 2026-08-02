@@ -1,0 +1,11 @@
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+[target.thumbv8m.main-none-eabihf]
+rustflags = [
+  "-C", "target-cpu=cortex-m33", # target chip
+  "-C", "link-arg=-Tlink.x", # tell linker to use link.x
+  "-C", "link-arg=--nmagic", # prevent padding memory
+]
+linker ="rust-lld"
+

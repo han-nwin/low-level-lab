@@ -1,4 +1,6 @@
-# Lab 018 — RP2350 Raw Clock + PLL Driver
+# Lab 013 — RP2350 Raw Clock + PLL Driver
+<https://www.ti.com/video/series/precision-labs/ti-precision-labs-introduction-to-clocks-and-timing.html>
+<https://www.analog.com/en/resources/analog-dialogue/articles/phase-locked-loop-pll-fundamentals.html>
 
 Implement the Raspberry Pi Pico 2 system-clock initialization yourself in raw Rust.
 
