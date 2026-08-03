@@ -95,17 +95,11 @@ unsafe fn enable_xosc_stable() {
     //       |
     //       +--> XOSC_CTRL
     //                "What crystal range? Enable oscillator?"
-    //
     //        ↓
-    //
     // XOSC begins running
-    //
     //        ↓
-    //
     // Hardware waits internally according to STARTUP.DELAY
-    //
     //        ↓
-    //
     // XOSC_STATUS.STABLE = 1
 }
 
