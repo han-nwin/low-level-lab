@@ -50,13 +50,72 @@ fn main() -> ! {
     unsafe {
         //enable xosc and wait for stable
         enable_xosc_stable();
+        // route clock sys to clock ref
         route_clk_sys_to_clk_ref();
+        // Route lock ref to ROSC
         route_clk_ref_to_rosc();
 
         // Reset PLL
-        reset_pll();
+        reset_pll_sys();
+        // config and lock PLL
+        config_and_lock_pll();
+        // route clk_ref to XOSC
     }
     loop {}
+}
+
+unsafe fn enable_xosc_stable() {
+    // The XOSC config
+    const XOSC_BASE: u32 = 0x4004_8000 as u32;
+    const XOSC_CTRL: *mut u32 = (XOSC_BASE + 0x00) as *mut u32;
+    const XOSC_STATUS: *const u32 = (XOSC_BASE + 0x04) as *const u32; //readonly
+    const XOSC_STARTUP: *mut u32 = (XOSC_BASE + 0x0c) as *mut u32;
+    // Table 599
+    const XOSC_STABLE_BIT: u32 = (1 << 31) as u32;
+    // CTRL register
+    // 31        24 23                  12 11                   0
+    // +-----------+----------------------+----------------------+
+    // | Reserved  | ENABLE (12 bits)     | FREQ_RANGE (12 bits) |
+    // +-----------+----------------------+----------------------+
+    //               0xFAB                 0xaa0
+    const XOSC_ENABLE_BIT: u32 = (0xfab << 12) as u32; // has to be from 23-12 bits
+    const XOSC_FREQ_RANGE: u32 = 0xaa0_u32; // 1_15MHZ, bits 0-11
+
+    unsafe {
+        // Datasheet table 588: CTRL Register
+        // NOTE: Startup delay
+        // Because the crystal need some time to start, let's wait 6ms
+
+        // Datasheet: XOSC_STARTUP register
+        // We want startup_delay = 6ms
+        // Startup delay = DELAY x 256 x xtal_period
+        // For 12 MHz crystal (RP235x)
+        //   282 x 256 x (1 / 12 MHz) = 6 ms startup time
+        // Gives the crystal oscillator time to stabilize before enabling use.
+        core::ptr::write_volatile(XOSC_STARTUP, 282); // give config for XOSC when it start
+
+        // Initiate the enable and select the frequency range
+        core::ptr::write_volatile(XOSC_CTRL, XOSC_ENABLE_BIT | XOSC_FREQ_RANGE);
+
+        // wait for stable
+        while (core::ptr::read_volatile(XOSC_STATUS) & XOSC_STABLE_BIT) == 0 {
+            core::hint::spin_loop();
+        }
+    }
+    // Configure XOSC
+    //       |
+    //       |
+    //       +--> XOSC_STARTUP
+    //       |        "How long should startup take?"
+    //       |
+    //       +--> XOSC_CTRL
+    //                "What crystal range? Enable oscillator?"
+    //        ↓
+    // XOSC begins running
+    //        ↓
+    // Hardware waits internally according to STARTUP.DELAY
+    //        ↓
+    // XOSC_STATUS.STABLE = 1
 }
 
 unsafe fn route_clk_sys_to_clk_ref() {
@@ -119,61 +178,7 @@ unsafe fn route_clk_ref_to_rosc() {
     }
 }
 
-unsafe fn enable_xosc_stable() {
-    // The XOSC config
-    const XOSC_BASE: u32 = 0x4004_8000 as u32;
-    const XOSC_CTRL: *mut u32 = (XOSC_BASE + 0x00) as *mut u32;
-    const XOSC_STATUS: *const u32 = (XOSC_BASE + 0x04) as *const u32; //readonly
-    const XOSC_STARTUP: *mut u32 = (XOSC_BASE + 0x0c) as *mut u32;
-    // Table 599
-    const XOSC_STABLE_BIT: u32 = (1 << 31) as u32;
-    // CTRL register
-    // 31        24 23                  12 11                   0
-    // +-----------+----------------------+----------------------+
-    // | Reserved  | ENABLE (12 bits)     | FREQ_RANGE (12 bits) |
-    // +-----------+----------------------+----------------------+
-    //               0xFAB                 0xaa0
-    const XOSC_ENABLE_BIT: u32 = (0xfab << 12) as u32; // has to be from 23-12 bits
-    const XOSC_FREQ_RANGE: u32 = 0xaa0_u32; // 1_15MHZ, bits 0-11
-
-    unsafe {
-        // Datasheet table 588: CTRL Register
-        // NOTE: Startup delay
-        // Because the crystal need some time to start, let's wait 6ms
-
-        // Datasheet: XOSC_STARTUP register
-        // We want startup_delay = 6ms
-        // Startup delay = DELAY x 256 x xtal_period
-        // For 12 MHz crystal (RP235x)
-        //   282 x 256 x (1 / 12 MHz) = 6 ms startup time
-        // Gives the crystal oscillator time to stabilize before enabling use.
-        core::ptr::write_volatile(XOSC_STARTUP, 282); // give config for XOSC when it start
-
-        // Initiate the enable and select the frequency range
-        core::ptr::write_volatile(XOSC_CTRL, XOSC_ENABLE_BIT | XOSC_FREQ_RANGE);
-
-        // wait for stable
-        while (core::ptr::read_volatile(XOSC_STATUS) & XOSC_STABLE_BIT) == 0 {
-            core::hint::spin_loop();
-        }
-    }
-    // Configure XOSC
-    //       |
-    //       |
-    //       +--> XOSC_STARTUP
-    //       |        "How long should startup take?"
-    //       |
-    //       +--> XOSC_CTRL
-    //                "What crystal range? Enable oscillator?"
-    //        ↓
-    // XOSC begins running
-    //        ↓
-    // Hardware waits internally according to STARTUP.DELAY
-    //        ↓
-    // XOSC_STATUS.STABLE = 1
-}
-
-unsafe fn reset_pll() {
+unsafe fn reset_pll_sys() {
     const RESETS_BASE: u32 = 0x4002_0000 as u32;
     const RESETS_RESET: *mut u32 = (RESETS_BASE + 0x00) as *mut u32;
     const RESETS_RESET_DONE: *const u32 = (RESETS_BASE + 0x08) as *const u32; // readonly
@@ -200,3 +205,117 @@ unsafe fn reset_pll() {
         }
     }
 }
+
+unsafe fn config_and_lock_pll() {
+    // 12 MHz crystal
+    // Reference Divider (REFDIV)
+    //        |
+    //        v
+    // Phase Locked Loop
+    //        |
+    //        v
+    // Feedback Divider (FBDIV)
+    //        |
+    //        v
+    // VCO
+    //        |
+    //        v
+    // POSTDIV1
+    //        |
+    // POSTDIV2
+    //        |
+    //        v
+    // PLL Output
+    //
+    // The frequency equation is:
+    // VCO = XOSC / REFDIV x FBDIV
+    // PLL_OUT = VCO / POSTDIV1 / POSTDIV2
+    // XOSC      = 12 MHz
+    // REFDIV    = 1
+    // FBDIV     = 125
+    // -> VCO = 1500MHz
+    // POSTDIV1  = 5
+    // POSTDIV2  = 2
+    // Output = 12*125 /5 /2 = 150Mhz
+    const PLL_SYS_BASE: u32 = 0x4005_0000_u32;
+    const PLL_SYS_CS: *mut u32 = (PLL_SYS_BASE + 0x00_u32) as *mut u32; // has refdiv and also lock
+    const PLL_SYS_PWR: *mut u32 = (PLL_SYS_BASE + 0x04_u32) as *mut u32; // for power
+    const PLL_FBDIV_INT: *mut u32 = (PLL_SYS_BASE + 0x08_u32) as *mut u32; // for fbdiv
+    const PLL_PRIM: *mut u32 = (PLL_SYS_BASE + 0x0c_u32) as *mut u32; // for postdiv1 and postdiv2
+
+    unsafe {
+        // 1. Power down PLL_SYS |
+        //         v
+        // 2. Configure PLL parameters
+        //         |
+        //         +--> REFDIV = 1
+        //         |
+        //         +--> FBDIV = 125
+        //         |
+        //         v
+        // 3. Power up PLL_SYS
+        //         |
+        //         v
+        // 4. Wait for PLL LOCK
+        //         |
+        //         v
+        // 5. Configure output divider
+        //         |
+        //         +--> POSTDIV1 = 5
+        //         |
+        //         +--> POSTDIV2 = 2
+        // 6. Enable PLL output divier. Since it got reset when we reset
+
+        // 1. Power down PLL_SYS
+        let pll_sys_pwr = core::ptr::read_volatile(PLL_SYS_PWR);
+        // bit 0 is PD: Power down; bit 5 is VCOPD: VCP power down
+        let new_pll_sys_pwr = (pll_sys_pwr & !(0b100001)) | (0b100001);
+        core::ptr::write_volatile(PLL_SYS_PWR, new_pll_sys_pwr);
+
+        // 2. Configure PLL parameters
+        // Set REFDIV = 1
+        let pll_sys_cs = core::ptr::read_volatile(PLL_SYS_CS);
+        let new_pll_sys_cs = (pll_sys_cs & !(0b11111) ) | 0b00001 // unset first 5 bit then set it to 0b00001
+        core::ptr::write_volatile(PLL_SYS_CS, new_pll_sys_cs);
+
+        // Set FBDIV = 125
+        let fbdiv = core::ptr::read_volatile(PLL_FBDIV_INT);
+        let bin_125 = 125_u32;
+        let new_fbdiv = (fbdiv & !((1<<12) -1)) | bin_125;
+        core::ptr::write_volatile(PLL_FBDIV_INT, new_fbdiv);
+
+        // 3. Power up
+        let pll_sys_pwr = core::ptr::read_volatile(PLL_SYS_PWR);
+        let new_pll_sys_pwr = (pll_sys_pwr & !(0b100001)); // clear bit 0 and 5
+        core::ptr::write_volatile(PLL_SYS_PWR, new_pll_sys_pwr);
+
+        // 4. wait for pll lock
+        while core::ptr::read_volatile(PLL_SYS_CS) & (1 << 31) == 0 {
+            core::hint::spin_loop();
+        }
+
+        // 5. Output divider
+        let pll_prim = core::ptr::read_volatile(PLL_PRIM);
+        let new_pll_prim = (pll_prim & !((0b111) << 16)) | (0b101 << 16); // postdiv1 = 5
+        let new_pll_prim = (new_pll_prim & !((0b111) << 12)) | (0b010 << 12); // postdiv2 = 2
+        core::ptr::write_volatile(PLL_PRIM, new_pll_prim);
+
+        // 6. Enable PLL output divider
+        let pll_pwr = core::ptr::read_volatile(PLL_SYS_PWR);
+        let new_pll_pwr = pll_pwr & !(0b1000); // clear bit 3
+        core::ptr::write_volatile(PLL_SYS_PWR, new_pll_pwr);
+    }
+}
+
+// TODO:
+unsafe fn route_clk_ref_to_xosc() {
+    const CLOCK_BASE: u32 = 0x4001_0000_u32;
+    const CLOCK_REF_CONTROL: *mut u32 = (CLOCK_BASE + 0x30) as *mut u32;
+    const CLOCK_REF_SELECTED: *const u32 = (CLOCK_BASE + 0x38) as *const u32;
+}
+
+// TODO:
+unsafe fn route_clk_sys_to_pll_sys() {}
+
+// TODO:
+unsafe fn route clk_prei_to_clk_sys() {}
