@@ -22,6 +22,45 @@ static IMAGE_DEF: [u32; 5] = [
 #[unsafe(link_section = ".my_metadata")]
 static METADATA: [u32; 1] = [u32::from_le_bytes(*b"Han!")];
 
+// NOTE: Clock tree looks like
+//           ROSC          XOSC
+//             |             |
+//             +------+------+
+//                    |
+//                    v
+//               +-----------+
+//               |  clk_ref  |
+//               +-----------+
+//                    |
+//         +----------+----------+
+//         |                     |
+//         v                     v
+//     PLL_SYS              Other logic
+//         |
+//         v
+//    1500 MHz VCO
+//         |
+//     POSTDIV1/2
+//         |
+//         v
+//    150 MHz PLL
+//         |
+//         v
+//    +-----------+
+//    |  clk_sys  |
+//    +-----------+
+//         |
+//   +-----+-----+
+//   |           |
+//   v           v
+// CPU      +-----------+
+//          | clk_peri  |
+//          +-----------+
+//               |
+//    +----------+----------+
+//    |    |     |     |    |
+//  UART  SPI   I2C   PWM  DMA
+
 #[entry]
 fn main() -> ! {
     // Crystal Oscillator Config:
@@ -59,15 +98,21 @@ fn main() -> ! {
         reset_pll_sys();
         // config and lock PLL
         config_and_lock_pll();
+
         // route clk_ref to XOSC
+        route_clk_ref_to_xosc();
+        // route clk_sys to pll_sys
+        route_clk_sys_to_pll_sys();
+        // route clk_peri to clk_sys
+        route_clk_peri_to_clk_sys();
     }
     loop {}
 }
 
 unsafe fn enable_xosc_stable() {
     // The XOSC config
-    const XOSC_BASE: u32 = 0x4004_8000 as u32;
-    const XOSC_CTRL: *mut u32 = (XOSC_BASE + 0x00) as *mut u32;
+    const XOSC_BASE: u32 = 0x4004_8000_u32;
+    const XOSC_CTRL: *mut u32 = (XOSC_BASE + 0x00_u32) as *mut u32;
     const XOSC_STATUS: *const u32 = (XOSC_BASE + 0x04) as *const u32; //readonly
     const XOSC_STARTUP: *mut u32 = (XOSC_BASE + 0x0c) as *mut u32;
     // Table 599
@@ -122,8 +167,6 @@ unsafe fn route_clk_sys_to_clk_ref() {
     const CLOCK_BASE: u32 = 0x4001_0000_u32;
     const CLOCK_SYS_CTRL: *mut u32 = (CLOCK_BASE + 0x3c) as *mut u32;
     const CLOCK_SYS_SELECTED: *const u32 = (CLOCK_BASE + 0x44) as *const u32;
-    const CLOCK_REF_CTRL: *mut u32 = (CLOCK_BASE + 0x30) as *mut u32;
-    const CLOCK_REF_SELECTED: *const u32 = (CLOCK_BASE + 0x38) as *const u32;
 
     // CLK_SYS_CTRL.SRC is bit 0:
     // 0 = CLK_REF
@@ -131,6 +174,11 @@ unsafe fn route_clk_sys_to_clk_ref() {
     const CLOCK_SYS_SRC_VALUE: u32 = 0; // set this to route to clk_ref
 
     // Route clk sys to clk ref
+    //                  +-----------+
+    // clk_ref -------->|           |
+    //                  | Glitchless|-----> clk_sys
+    // AUX mux ---xx--->|    MUX    |
+    //                  +-----------+
     unsafe {
         let clk_ctr = core::ptr::read_volatile(CLOCK_SYS_CTRL);
         // unset the last bit with & !0b1 then set it to new value
@@ -275,13 +323,13 @@ unsafe fn config_and_lock_pll() {
         // 2. Configure PLL parameters
         // Set REFDIV = 1
         let pll_sys_cs = core::ptr::read_volatile(PLL_SYS_CS);
-        let new_pll_sys_cs = (pll_sys_cs & !(0b11111) ) | 0b00001 // unset first 5 bit then set it to 0b00001
+        let new_pll_sys_cs = (pll_sys_cs & !(0b11111)) | 0b00001; // unset first 5 bit then set it to 0b00001
         core::ptr::write_volatile(PLL_SYS_CS, new_pll_sys_cs);
 
         // Set FBDIV = 125
         let fbdiv = core::ptr::read_volatile(PLL_FBDIV_INT);
         let bin_125 = 125_u32;
-        let new_fbdiv = (fbdiv & !((1<<12) -1)) | bin_125;
+        let new_fbdiv = (fbdiv & !((1 << 12) - 1)) | bin_125;
         core::ptr::write_volatile(PLL_FBDIV_INT, new_fbdiv);
 
         // 3. Power up
@@ -301,21 +349,91 @@ unsafe fn config_and_lock_pll() {
         core::ptr::write_volatile(PLL_PRIM, new_pll_prim);
 
         // 6. Enable PLL output divider
+        // POSTDIVPD resets high, so the post-divider output is disabled.
+        // Clear it after configuring POSTDIV1/2.
         let pll_pwr = core::ptr::read_volatile(PLL_SYS_PWR);
         let new_pll_pwr = pll_pwr & !(0b1000); // clear bit 3
         core::ptr::write_volatile(PLL_SYS_PWR, new_pll_pwr);
     }
 }
 
-// TODO:
 unsafe fn route_clk_ref_to_xosc() {
     const CLOCK_BASE: u32 = 0x4001_0000_u32;
-    const CLOCK_REF_CONTROL: *mut u32 = (CLOCK_BASE + 0x30) as *mut u32;
+    const CLOCK_REF_CTRL: *mut u32 = (CLOCK_BASE + 0x30) as *mut u32;
     const CLOCK_REF_SELECTED: *const u32 = (CLOCK_BASE + 0x38) as *const u32;
+
+    //1:0 SRC: Selects the clock source glitchlessly, can be changed on-the-fly
+    // Enumerated values:
+    // 0x0 ROSC_CLKSRC_PH
+    // 0x1 CLKSRC_CLK_REF_AUX
+    // 0x2 XOSC_CLKSRC
+    // 0x3 LPOSC_CLKSRC
+    const CLOCK_REF_SRC_VALUE: u32 = 0x2; // -> XOSC
+
+    unsafe {
+        let clk_ctr = core::ptr::read_volatile(CLOCK_REF_CTRL);
+        let new_clk_ctr = (clk_ctr & !0b11_u32) | CLOCK_REF_SRC_VALUE;
+        core::ptr::write_volatile(CLOCK_REF_CTRL, new_clk_ctr);
+
+        // wait till it set
+        // xosc is bit 2
+        while (core::ptr::read_volatile(CLOCK_REF_SELECTED) & (0b1111)) != 0b0100 {
+            core::hint::spin_loop();
+        }
+    }
 }
 
-// TODO:
-unsafe fn route_clk_sys_to_pll_sys() {}
+unsafe fn route_clk_sys_to_pll_sys() {
+    const CLOCK_BASE: u32 = 0x4001_0000_u32;
+    const CLOCK_SYS_CTRL: *mut u32 = (CLOCK_BASE + 0x3c) as *mut u32;
+    const CLOCK_SYS_SELECTED: *const u32 = (CLOCK_BASE + 0x44) as *const u32;
 
-// TODO:
-unsafe fn route clk_prei_to_clk_sys() {}
+    const CLOCK_SYS_AUXSRC_VALUE: u32 = 0b000;
+
+    unsafe {
+        //PLL_SYS
+        //     |
+        //     v
+        // +-----------+
+        // |  AUX MUX  |----+
+        // +-----------+    |
+        //                  v
+        //             +-----------+
+        // clk_ref --->| Glitchless|-----> clk_sys
+        //             |    MUX    |
+        //             +-----------+
+
+        // configure AUX source -> PLL_SYS
+        let clk_ctr = core::ptr::read_volatile(CLOCK_SYS_CTRL);
+        let new_clk_ctr = (clk_ctr & !(0b111 << 5)) | (CLOCK_SYS_AUXSRC_VALUE << 5);
+        core::ptr::write_volatile(CLOCK_SYS_CTRL, new_clk_ctr);
+
+        // switch SRC -> AUX
+        let clk_ctr = core::ptr::read_volatile(CLOCK_SYS_CTRL);
+        let new_clk_ctr = (clk_ctr & !(0b1)) | 0b1;
+        core::ptr::write_volatile(CLOCK_SYS_CTRL, new_clk_ctr);
+
+        // wait till it selected
+        while (core::ptr::read_volatile(CLOCK_SYS_SELECTED) & (0b11)) != 0b10 {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+unsafe fn route_clk_peri_to_clk_sys() {
+    const CLOCK_BASE: u32 = 0x4001_0000_u32;
+    const CLOCK_PERI_CTRL: *mut u32 = (CLOCK_BASE + 0x48) as *mut u32;
+
+    const CLOCK_PERI_CTRL_AUXSRC_VALUE: u32 = 0x0_u32;
+
+    unsafe {
+        let clk_ctr = core::ptr::read_volatile(CLOCK_PERI_CTRL);
+        let new_clk_ctr = (clk_ctr & !(0b111 << 5)) | (CLOCK_PERI_CTRL_AUXSRC_VALUE << 5);
+        core::ptr::write_volatile(CLOCK_PERI_CTRL, new_clk_ctr);
+
+        // There's nothing to wait since there's only one mux controlled by AUXSRC
+        //            +---------+
+        // AUXSRC --->|  MUX    |----> clk_peri
+        //            +---------+
+    }
+}
