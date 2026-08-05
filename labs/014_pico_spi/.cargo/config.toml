@@ -1,0 +1,19 @@
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+[target.thumbv8m.main-none-eabihf]
+runner = [
+  "picotool",
+  "load",
+  "-v",
+  "-x",
+  "-t",
+  "elf"
+]
+rustflags = [
+  "-C", "target-cpu=cortex-m33", # target cpu
+  "-C", "link-arg=-Tlink.x", # use cortex_m_rt link.x
+  "-C", "link-arg=--nmagic", # prevent padding memory
+  "-C", "link-arg=-Tdefmt.x", # link defmt
+]
+linker = "rust-lld"
