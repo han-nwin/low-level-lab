@@ -19,6 +19,7 @@ int main(int argc, char **argv) {
         std::cout << "The first command-line argument is " << argv[1] << '\n';
     } else {
         std::cout << "No command-line arguments were provided.\n";
+        std::println("From println"); // C++23
     }
     return 0;
 }
