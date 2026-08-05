@@ -69,6 +69,13 @@ static METADATA: [u32; 1] = [u32::from_le_bytes(*b"Han!")];
 //                         |    |     |     |    |
 //                       UART  SPI   I2C   PWM  DMA
 
+#[repr(u32)]
+#[derive(Clone, Copy, defmt::Format)]
+enum HardwareStatus {
+    PASS = 1_u32 << 0,
+    FAIL = 1 << 16,
+}
+
 #[entry]
 fn main() -> ! {
     // Crystal Oscillator Config:
@@ -126,18 +133,20 @@ fn main() -> ! {
         route_clk_peri_to_clk_sys();
 
         // TESTING
-        let measured_sys_khz = measure_clk_sys_khz();
+        // Change this when intentionally testing a different clk_sys frequency.
+        const EXPECTED_SYS_KHZ: u32 = 300_000;
+        const PERCENT_TOLERANCE: u32 = 1;
+
+        let (measured_sys_khz, hardware_status) =
+            measure_clk_sys_khz(EXPECTED_SYS_KHZ, PERCENT_TOLERANCE);
         defmt::info!("measured clk_sys = {} kHz", measured_sys_khz);
+        defmt::info!("hardware_status = {}", hardware_status);
 
         init_gpio16_output();
 
         // A blinking LED means FC0 measured clk_sys within 1% of the expected
         // frequency. If the measurement is outside that range, leave it off.
-
-        // Change this when intentionally testing a different clk_sys frequency.
-        const EXPECTED_SYS_KHZ: u32 = 300_000;
-
-        let tolerance_khz = EXPECTED_SYS_KHZ / 100;
+        let tolerance_khz = (EXPECTED_SYS_KHZ / 100) * PERCENT_TOLERANCE;
         if measured_sys_khz.abs_diff(EXPECTED_SYS_KHZ) <= tolerance_khz {
             const SIO_BASE: u32 = 0xd000_0000;
             const GPIO_OUT_SET: *mut u32 = (SIO_BASE + 0x18) as *mut u32;
@@ -145,6 +154,7 @@ fn main() -> ! {
             const GPIO16: u32 = 1 << 16;
 
             loop {
+                defmt::info!("Led blinking...");
                 core::ptr::write_volatile(GPIO_OUT_SET, GPIO16);
                 // NOTE: At the intentional 300 MHz overclock, 75 million cycles is about
                 // 0.25 seconds. At the rated 150 MHz it would be about 0.5 seconds.
@@ -164,7 +174,10 @@ fn main() -> ! {
     }
 }
 
-unsafe fn measure_clk_sys_khz() -> u32 {
+unsafe fn measure_clk_sys_khz(
+    expected_sys_khz: u32,
+    percent_tolerance: u32,
+) -> (u32, HardwareStatus) {
     const CLOCK_BASE: u32 = 0x4001_0000;
     const FC0_REF_KHZ: *mut u32 = (CLOCK_BASE + 0x8c) as *mut u32;
     const FC0_MIN_KHZ: *mut u32 = (CLOCK_BASE + 0x90) as *mut u32;
@@ -189,9 +202,17 @@ unsafe fn measure_clk_sys_khz() -> u32 {
         core::ptr::write_volatile(FC0_REF_KHZ, 12_000);
         core::ptr::write_volatile(FC0_INTERVAL, 10);
 
-        // We compare the result in software, so disable the hardware pass range.
-        core::ptr::write_volatile(FC0_MIN_KHZ, 0);
-        core::ptr::write_volatile(FC0_MAX_KHZ, 0x01ff_ffff);
+        // Even though we compare the result in software
+        // This is another way to check if the frequency is in range with hardware
+        // The only downside is the output only PASS or FAIL
+        core::ptr::write_volatile(
+            FC0_MIN_KHZ,
+            expected_sys_khz - (expected_sys_khz / 100) * percent_tolerance,
+        );
+        core::ptr::write_volatile(
+            FC0_MAX_KHZ,
+            expected_sys_khz + (expected_sys_khz / 100) * percent_tolerance,
+        );
 
         // Writing the source starts a measurement. 0x09 selects clk_sys.
         core::ptr::write_volatile(FC0_SRC, SRC_CLK_SYS);
@@ -200,8 +221,17 @@ unsafe fn measure_clk_sys_khz() -> u32 {
             core::hint::spin_loop();
         }
 
+        let raw_hw_status = core::ptr::read_volatile(FC0_STATUS);
+        let hw_status = if raw_hw_status & (HardwareStatus::FAIL as u32) != 0 {
+            HardwareStatus::FAIL
+        } else if raw_hw_status & (HardwareStatus::PASS as u32) != 0 {
+            HardwareStatus::PASS
+        } else {
+            panic!("unexpected FC0 status: {:#x}", raw_hw_status); //0x..
+        };
+
         // RESULT bits 29:5 contain whole kHz; bits 4:0 are the fraction.
-        core::ptr::read_volatile(FC0_RESULT) >> 5
+        (core::ptr::read_volatile(FC0_RESULT) >> 5, hw_status)
     }
 }
 
