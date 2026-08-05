@@ -43,30 +43,43 @@ static METADATA: [u32; 1] = [u32::from_le_bytes(*b"Han!")];
 //     POSTDIV1/2
 //         |
 //         v
-//    150 MHz PLL
+//    150 MHz PLL output
 //         |
 //         v
-//    +-----------+
-//    |  clk_sys  |
-//    +-----------+
-//         |
-//   +-----+-----+
-//   |           |
-//   v           v
-// CPU      +-----------+
-//          | clk_peri  |
-//          +-----------+
-//               |
-//    +----------+----------+
-//    |    |     |     |    |
-//  UART  SPI   I2C   PWM  DMA
+//    +-----------+     +-------------+
+//    | clk_sys   |---->| CLK_SYS_DIV |----> final clk_sys
+//    | source mux|     | divide by 1 |
+//    +-----------+     +-------------+
+//                              |
+//                        +-----+-----+
+//                        |           |
+//                        v           v
+//                       CPU     +-----------+
+//                               | clk_peri  |----> CLK_PERI_DIV ----> peripheral clock
+//                               | source mux|
+//                               +-----------+
+//                                    |
+//                         +----------+----------+
+//                         |    |     |     |    |
+//                       UART  SPI   I2C   PWM  DMA
 
 #[entry]
 fn main() -> ! {
     // Crystal Oscillator Config:
     // DataSheet: 8.1.2.3
     // NOTE: The setup flow
-    // Crystal → XOSC → PLL_SYS → clk_sys → CPU
+    // Crystal → XOSC → PLL_SYS → clk_sys mux → CLK_SYS_DIV → CPU
+    //
+    // IMPORTANT: The PLL configuration ends at the PLL_SYS output. Even when
+    // PLL_SYS is 150 MHz, the separate clock-slice divider can divide it again:
+    //
+    // clk_sys = PLL_SYS output / CLK_SYS_DIV
+    //         = 150 MHz / 1
+    //         = 150 MHz
+    //
+    // CLK_SYS_DIV uses fixed-point encoding: divide-by-1 is 1 << 16. The
+    // CLK_REF_DIV and CLK_PERI_DIV registers are separate downstream dividers;
+    // they are not the PLL's REFDIV, POSTDIV1, or POSTDIV2 fields.
 
     // Since at start, CPU may already use PLL
     // We need to reconfigure from downstream → upstream
@@ -80,11 +93,11 @@ fn main() -> ! {
     //     ↓
     // configure and lock PLL_SYS
     //     ↓
-    // clk_ref → XOSC
+    // CLK_REF_DIV = 1, then clk_ref → XOSC
     //     ↓
-    // clk_sys → PLL_SYS
+    // CLK_SYS_DIV = 1, then clk_sys → PLL_SYS
     //     ↓
-    // clk_peri → clk_sys
+    // CLK_PERI_DIV = 1, then enable clk_peri → clk_sys
 
     unsafe {
         //enable xosc and wait for stable
@@ -273,7 +286,7 @@ unsafe fn config_and_lock_pll() {
     // POSTDIV2
     //        |
     //        v
-    // PLL Output
+    // PLL Output (not necessarily the final CPU clock yet)
     //
     // The frequency equation is:
     // VCO = XOSC / REFDIV x FBDIV
@@ -285,6 +298,16 @@ unsafe fn config_and_lock_pll() {
     // POSTDIV1  = 5
     // POSTDIV2  = 2
     // Output = 12*125 /5 /2 = 150Mhz
+    //
+    // This function configures only the dividers inside PLL_SYS. After this
+    // function returns, the 150 MHz PLL output still travels through:
+    //
+    // NOTE: PLL_SYS output -> CLK_SYS source mux -> CLK_SYS_DIV -> CPU/system fabric
+    //     150 MHz                                  / 1  -> 150 MHz
+    //
+    // NOTE: If CLK_SYS_DIV were 2, the PLL would still be 150 MHz but the CPU would
+    // receive only 75 MHz. That is why the final clock-routing step must also
+    // make CLK_SYS_DIV explicitly divide by 1.
     const PLL_SYS_BASE: u32 = 0x4005_0000_u32;
     const PLL_SYS_CS: *mut u32 = (PLL_SYS_BASE + 0x00_u32) as *mut u32; // has refdiv and also lock
     const PLL_SYS_PWR: *mut u32 = (PLL_SYS_BASE + 0x04_u32) as *mut u32; // for power
@@ -361,6 +384,7 @@ unsafe fn route_clk_ref_to_xosc() {
     const CLOCK_BASE: u32 = 0x4001_0000_u32;
     const CLOCK_REF_CTRL: *mut u32 = (CLOCK_BASE + 0x30) as *mut u32;
     const CLOCK_REF_SELECTED: *const u32 = (CLOCK_BASE + 0x38) as *const u32;
+    const CLOCK_REF_DIV: *mut u32 = (CLOCK_BASE + 0x34) as *mut u32;
 
     //1:0 SRC: Selects the clock source glitchlessly, can be changed on-the-fly
     // Enumerated values:
@@ -371,6 +395,12 @@ unsafe fn route_clk_ref_to_xosc() {
     const CLOCK_REF_SRC_VALUE: u32 = 0x2; // -> XOSC
 
     unsafe {
+        // Set clk_ref_div to 1
+        let clk_div = core::ptr::read_volatile(CLOCK_REF_DIV);
+        let new_clk_div = (clk_div & !(1 << 16)) | (1 << 16);
+        core::ptr::write_volatile(CLOCK_REF_DIV, new_clk_div);
+
+        // Choose xosc
         let clk_ctr = core::ptr::read_volatile(CLOCK_REF_CTRL);
         let new_clk_ctr = (clk_ctr & !0b11_u32) | CLOCK_REF_SRC_VALUE;
         core::ptr::write_volatile(CLOCK_REF_CTRL, new_clk_ctr);
@@ -387,11 +417,15 @@ unsafe fn route_clk_sys_to_pll_sys() {
     const CLOCK_BASE: u32 = 0x4001_0000_u32;
     const CLOCK_SYS_CTRL: *mut u32 = (CLOCK_BASE + 0x3c) as *mut u32;
     const CLOCK_SYS_SELECTED: *const u32 = (CLOCK_BASE + 0x44) as *const u32;
+    // This is a separate divider after the clk_sys source mux. Its 16.16
+    // fixed-point encoding means divide-by-1 is written as 1 << 16.
+    const CLOCK_SYS_DIV: *mut u32 = (CLOCK_BASE + 0x40) as *mut u32;
 
     const CLOCK_SYS_AUXSRC_VALUE: u32 = 0b000;
 
     unsafe {
-        //PLL_SYS
+        //
+        // PLL_SYS output (150 MHz)
         //     |
         //     v
         // +-----------+
@@ -399,9 +433,25 @@ unsafe fn route_clk_sys_to_pll_sys() {
         // +-----------+    |
         //                  v
         //             +-----------+
-        // clk_ref --->| Glitchless|-----> clk_sys
+        // clk_ref --->| Glitchless|
         //             |    MUX    |
-        //             +-----------+
+        //             +-----+-----+
+        //                   |
+        //                   v
+        //             +-------------+
+        //             | CLK_SYS_DIV |  divide-by-1 passes all 150 MHz through
+        //             +-------------+
+        //                    |
+        //                    v
+        //             CPU/system fabric
+        //
+        // Selecting PLL_SYS below only chooses the mux input. CLK_SYS_DIV is a
+        // later, independent divider and can reduce the final CPU clock again.
+
+        // Set clk_sys_div to 1
+        let clk_div = core::ptr::read_volatile(CLOCK_SYS_DIV);
+        let new_clk_div = (clk_div & !(1 << 16)) | (1 << 16);
+        core::ptr::write_volatile(CLOCK_SYS_DIV, new_clk_div);
 
         // configure AUX source -> PLL_SYS
         let clk_ctr = core::ptr::read_volatile(CLOCK_SYS_CTRL);
@@ -423,10 +473,27 @@ unsafe fn route_clk_sys_to_pll_sys() {
 unsafe fn route_clk_peri_to_clk_sys() {
     const CLOCK_BASE: u32 = 0x4001_0000_u32;
     const CLOCK_PERI_CTRL: *mut u32 = (CLOCK_BASE + 0x48) as *mut u32;
+    const CLOCK_PERI_DIV: *mut u32 = (CLOCK_BASE + 0x4c) as *mut u32;
 
     const CLOCK_PERI_CTRL_AUXSRC_VALUE: u32 = 0x0_u32;
 
     unsafe {
+        // Set clk_peri_div to 1
+        let clk_div = core::ptr::read_volatile(CLOCK_PERI_DIV);
+        let new_clk_div = (clk_div & !(1 << 16)) | (1 << 16);
+        core::ptr::write_volatile(CLOCK_PERI_DIV, new_clk_div);
+
+        // Software enable
+        let clk_ctr = core::ptr::read_volatile(CLOCK_PERI_CTRL);
+        let new_clk_ctr = (clk_ctr & !(1 << 11)) | (1 << 11);
+        core::ptr::write_volatile(CLOCK_PERI_CTRL, new_clk_ctr);
+
+        // wait for Hardware to say it's enabled
+        while core::ptr::read_volatile(CLOCK_PERI_CTRL) & (1 << 28) == 0 {
+            core::hint::spin_loop();
+        }
+
+        // Route to clk_sys
         let clk_ctr = core::ptr::read_volatile(CLOCK_PERI_CTRL);
         let new_clk_ctr = (clk_ctr & !(0b111 << 5)) | (CLOCK_PERI_CTRL_AUXSRC_VALUE << 5);
         core::ptr::write_volatile(CLOCK_PERI_CTRL, new_clk_ctr);
