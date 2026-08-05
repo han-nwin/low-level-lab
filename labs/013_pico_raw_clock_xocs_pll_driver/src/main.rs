@@ -1,7 +1,9 @@
 #![no_std]
 #![no_main]
 
+use cortex_m as _;
 use cortex_m_rt::entry;
+use defmt_rtt as _;
 use panic_halt as _;
 
 // NOTE: use static so that it's guaranteed to have a real object in memory
@@ -22,7 +24,11 @@ static IMAGE_DEF: [u32; 5] = [
 #[unsafe(link_section = ".my_metadata")]
 static METADATA: [u32; 1] = [u32::from_le_bytes(*b"Han!")];
 
-// NOTE: Clock tree looks like
+// NOTE: This lab intentionally overclocks clk_sys to 300 MHz. RP2350 is rated
+// for operation up to 150 MHz, so 300 MHz is an experiment, not a guaranteed
+// production configuration.
+//
+// Clock tree looks like
 //           ROSC          XOSC
 //             |             |
 //             +------+------+
@@ -43,7 +49,7 @@ static METADATA: [u32; 1] = [u32::from_le_bytes(*b"Han!")];
 //     POSTDIV1/2
 //         |
 //         v
-//    150 MHz PLL output
+//    300 MHz PLL output
 //         |
 //         v
 //    +-----------+     +-------------+
@@ -71,11 +77,11 @@ fn main() -> ! {
     // Crystal → XOSC → PLL_SYS → clk_sys mux → CLK_SYS_DIV → CPU
     //
     // IMPORTANT: The PLL configuration ends at the PLL_SYS output. Even when
-    // PLL_SYS is 150 MHz, the separate clock-slice divider can divide it again:
+    // PLL_SYS is 300 MHz, the separate clock-slice divider can divide it again:
     //
     // clk_sys = PLL_SYS output / CLK_SYS_DIV
-    //         = 150 MHz / 1
-    //         = 150 MHz
+    //         = 300 MHz / 1
+    //         = 300 MHz
     //
     // CLK_SYS_DIV uses fixed-point encoding: divide-by-1 is 1 << 16. The
     // CLK_REF_DIV and CLK_PERI_DIV registers are separate downstream dividers;
@@ -118,8 +124,85 @@ fn main() -> ! {
         route_clk_sys_to_pll_sys();
         // route clk_peri to clk_sys
         route_clk_peri_to_clk_sys();
+
+        // TESTING
+        let measured_sys_khz = measure_clk_sys_khz();
+        defmt::info!("measured clk_sys = {} kHz", measured_sys_khz);
+
+        init_gpio16_output();
+
+        // A blinking LED means FC0 measured clk_sys within 1% of the expected
+        // frequency. If the measurement is outside that range, leave it off.
+
+        // Change this when intentionally testing a different clk_sys frequency.
+        const EXPECTED_SYS_KHZ: u32 = 300_000;
+
+        let tolerance_khz = EXPECTED_SYS_KHZ / 100;
+        if measured_sys_khz.abs_diff(EXPECTED_SYS_KHZ) <= tolerance_khz {
+            const SIO_BASE: u32 = 0xd000_0000;
+            const GPIO_OUT_SET: *mut u32 = (SIO_BASE + 0x18) as *mut u32;
+            const GPIO_OUT_CLR: *mut u32 = (SIO_BASE + 0x20) as *mut u32;
+            const GPIO16: u32 = 1 << 16;
+
+            loop {
+                core::ptr::write_volatile(GPIO_OUT_SET, GPIO16);
+                // NOTE: At the intentional 300 MHz overclock, 75 million cycles is about
+                // 0.25 seconds. At the rated 150 MHz it would be about 0.5 seconds.
+                cortex_m::asm::delay(75_000_000);
+
+                core::ptr::write_volatile(GPIO_OUT_CLR, GPIO16);
+
+                // Another approximately 0.25 seconds at 300 MHz.
+                cortex_m::asm::delay(75_000_000);
+            }
+        }
+
+        loop {
+            core::hint::spin_loop();
+            defmt::info!("The configured clock is outside of tolerance range!! SOMETHING WRONG");
+        }
     }
-    loop {}
+}
+
+unsafe fn measure_clk_sys_khz() -> u32 {
+    const CLOCK_BASE: u32 = 0x4001_0000;
+    const FC0_REF_KHZ: *mut u32 = (CLOCK_BASE + 0x8c) as *mut u32;
+    const FC0_MIN_KHZ: *mut u32 = (CLOCK_BASE + 0x90) as *mut u32;
+    const FC0_MAX_KHZ: *mut u32 = (CLOCK_BASE + 0x94) as *mut u32;
+    const FC0_INTERVAL: *mut u32 = (CLOCK_BASE + 0x9c) as *mut u32;
+    const FC0_SRC: *mut u32 = (CLOCK_BASE + 0xa0) as *mut u32;
+    const FC0_STATUS: *const u32 = (CLOCK_BASE + 0xa4) as *const u32;
+    const FC0_RESULT: *const u32 = (CLOCK_BASE + 0xa8) as *const u32;
+
+    const STATUS_RUNNING: u32 = 1 << 8;
+    const STATUS_DONE: u32 = 1 << 4;
+    const SRC_CLK_SYS: u32 = 0x09;
+
+    unsafe {
+        // Do not reconfigure FC0 while an earlier measurement is running.
+        while core::ptr::read_volatile(FC0_STATUS) & STATUS_RUNNING != 0 {
+            core::hint::spin_loop();
+        }
+
+        // FC0 uses clk_ref as its reference. clk_ref is the 12 MHz XOSC after
+        // route_clk_ref_to_xosc(), so tell FC0 that the reference is 12,000 kHz.
+        core::ptr::write_volatile(FC0_REF_KHZ, 12_000);
+        core::ptr::write_volatile(FC0_INTERVAL, 10);
+
+        // We compare the result in software, so disable the hardware pass range.
+        core::ptr::write_volatile(FC0_MIN_KHZ, 0);
+        core::ptr::write_volatile(FC0_MAX_KHZ, 0x01ff_ffff);
+
+        // Writing the source starts a measurement. 0x09 selects clk_sys.
+        core::ptr::write_volatile(FC0_SRC, SRC_CLK_SYS);
+
+        while core::ptr::read_volatile(FC0_STATUS) & STATUS_DONE == 0 {
+            core::hint::spin_loop();
+        }
+
+        // RESULT bits 29:5 contain whole kHz; bits 4:0 are the fraction.
+        core::ptr::read_volatile(FC0_RESULT) >> 5
+    }
 }
 
 unsafe fn enable_xosc_stable() {
@@ -240,7 +323,7 @@ unsafe fn route_clk_ref_to_rosc() {
 }
 
 unsafe fn reset_pll_sys() {
-    const RESETS_BASE: u32 = 0x4002_0000 as u32;
+    const RESETS_BASE: u32 = 0x4002_0000_u32;
     const RESETS_RESET: *mut u32 = (RESETS_BASE + 0x00) as *mut u32;
     const RESETS_RESET_DONE: *const u32 = (RESETS_BASE + 0x08) as *const u32; // readonly
     const PLL_SYS_RESET_OFFSET: u32 = (1 << 14) as u32;
@@ -296,17 +379,17 @@ unsafe fn config_and_lock_pll() {
     // FBDIV     = 125
     // -> VCO = 1500MHz
     // POSTDIV1  = 5
-    // POSTDIV2  = 2
-    // Output = 12*125 /5 /2 = 150Mhz
+    // POSTDIV2  = 1
+    // Output = 12*125 /5 /1 = 300 MHz
     //
     // This function configures only the dividers inside PLL_SYS. After this
-    // function returns, the 150 MHz PLL output still travels through:
+    // function returns, the 300 MHz PLL output still travels through:
     //
     // NOTE: PLL_SYS output -> CLK_SYS source mux -> CLK_SYS_DIV -> CPU/system fabric
-    //     150 MHz                                  / 1  -> 150 MHz
+    //     300 MHz                                  / 1  -> 300 MHz
     //
-    // NOTE: If CLK_SYS_DIV were 2, the PLL would still be 150 MHz but the CPU would
-    // receive only 75 MHz. That is why the final clock-routing step must also
+    // NOTE: If CLK_SYS_DIV were 2, the PLL would still be 300 MHz but the CPU would
+    // receive 150 MHz. That is why the final clock-routing step must also
     // make CLK_SYS_DIV explicitly divide by 1.
     const PLL_SYS_BASE: u32 = 0x4005_0000_u32;
     const PLL_SYS_CS: *mut u32 = (PLL_SYS_BASE + 0x00_u32) as *mut u32; // has refdiv and also lock
@@ -334,7 +417,7 @@ unsafe fn config_and_lock_pll() {
         //         |
         //         +--> POSTDIV1 = 5
         //         |
-        //         +--> POSTDIV2 = 2
+        //         +--> POSTDIV2 = 1
         // 6. Enable PLL output divier. Since it got reset when we reset
 
         // 1. Power down PLL_SYS
@@ -346,7 +429,7 @@ unsafe fn config_and_lock_pll() {
         // 2. Configure PLL parameters
         // Set REFDIV = 1
         let pll_sys_cs = core::ptr::read_volatile(PLL_SYS_CS);
-        let new_pll_sys_cs = (pll_sys_cs & !(0b11111)) | 0b00001; // unset first 5 bit then set it to 0b00001
+        let new_pll_sys_cs = (pll_sys_cs & !(0b11_1111)) | 0b00_0001; // unset first 6 bit then set it to 0b00_0001
         core::ptr::write_volatile(PLL_SYS_CS, new_pll_sys_cs);
 
         // Set FBDIV = 125
@@ -357,7 +440,7 @@ unsafe fn config_and_lock_pll() {
 
         // 3. Power up
         let pll_sys_pwr = core::ptr::read_volatile(PLL_SYS_PWR);
-        let new_pll_sys_pwr = (pll_sys_pwr & !(0b100001)); // clear bit 0 and 5
+        let new_pll_sys_pwr = pll_sys_pwr & !(0b100001); // clear bit 0 and 5
         core::ptr::write_volatile(PLL_SYS_PWR, new_pll_sys_pwr);
 
         // 4. wait for pll lock
@@ -368,7 +451,7 @@ unsafe fn config_and_lock_pll() {
         // 5. Output divider
         let pll_prim = core::ptr::read_volatile(PLL_PRIM);
         let new_pll_prim = (pll_prim & !((0b111) << 16)) | (0b101 << 16); // postdiv1 = 5
-        let new_pll_prim = (new_pll_prim & !((0b111) << 12)) | (0b010 << 12); // postdiv2 = 2
+        let new_pll_prim = (new_pll_prim & !((0b111) << 12)) | (0b001 << 12); // postdiv2 = 1
         core::ptr::write_volatile(PLL_PRIM, new_pll_prim);
 
         // 6. Enable PLL output divider
@@ -396,9 +479,7 @@ unsafe fn route_clk_ref_to_xosc() {
 
     unsafe {
         // Set clk_ref_div to 1
-        let clk_div = core::ptr::read_volatile(CLOCK_REF_DIV);
-        let new_clk_div = (clk_div & !(1 << 16)) | (1 << 16);
-        core::ptr::write_volatile(CLOCK_REF_DIV, new_clk_div);
+        core::ptr::write_volatile(CLOCK_REF_DIV, 1 << 16);
 
         // Choose xosc
         let clk_ctr = core::ptr::read_volatile(CLOCK_REF_CTRL);
@@ -425,7 +506,7 @@ unsafe fn route_clk_sys_to_pll_sys() {
 
     unsafe {
         //
-        // PLL_SYS output (150 MHz)
+        // PLL_SYS output (300 MHz, intentionally overclocked)
         //     |
         //     v
         // +-----------+
@@ -439,7 +520,7 @@ unsafe fn route_clk_sys_to_pll_sys() {
         //                   |
         //                   v
         //             +-------------+
-        //             | CLK_SYS_DIV |  divide-by-1 passes all 150 MHz through
+        //             | CLK_SYS_DIV |  divide-by-1 passes all 300 MHz through
         //             +-------------+
         //                    |
         //                    v
@@ -449,9 +530,7 @@ unsafe fn route_clk_sys_to_pll_sys() {
         // later, independent divider and can reduce the final CPU clock again.
 
         // Set clk_sys_div to 1
-        let clk_div = core::ptr::read_volatile(CLOCK_SYS_DIV);
-        let new_clk_div = (clk_div & !(1 << 16)) | (1 << 16);
-        core::ptr::write_volatile(CLOCK_SYS_DIV, new_clk_div);
+        core::ptr::write_volatile(CLOCK_SYS_DIV, 1 << 16);
 
         // configure AUX source -> PLL_SYS
         let clk_ctr = core::ptr::read_volatile(CLOCK_SYS_CTRL);
@@ -478,12 +557,25 @@ unsafe fn route_clk_peri_to_clk_sys() {
     const CLOCK_PERI_CTRL_AUXSRC_VALUE: u32 = 0x0_u32;
 
     unsafe {
-        // Set clk_peri_div to 1
-        let clk_div = core::ptr::read_volatile(CLOCK_PERI_DIV);
-        let new_clk_div = (clk_div & !(1 << 16)) | (1 << 16);
-        core::ptr::write_volatile(CLOCK_PERI_DIV, new_clk_div);
+        // Disable
+        let clk_ctr = core::ptr::read_volatile(CLOCK_PERI_CTRL);
+        let new_clk_ctr = clk_ctr & !(1 << 11);
+        core::ptr::write_volatile(CLOCK_PERI_CTRL, new_clk_ctr);
 
-        // Software enable
+        // wait for Hardware to say it's diabled
+        while core::ptr::read_volatile(CLOCK_PERI_CTRL) & (1 << 28) != 0 {
+            core::hint::spin_loop();
+        }
+
+        // Set clk_peri_div to 1
+        core::ptr::write_volatile(CLOCK_PERI_DIV, 1 << 16);
+
+        // Route to clk_sys while disabled
+        let clk_ctr = core::ptr::read_volatile(CLOCK_PERI_CTRL);
+        let new_clk_ctr = (clk_ctr & !(0b111 << 5)) | (CLOCK_PERI_CTRL_AUXSRC_VALUE << 5);
+        core::ptr::write_volatile(CLOCK_PERI_CTRL, new_clk_ctr);
+
+        // enable
         let clk_ctr = core::ptr::read_volatile(CLOCK_PERI_CTRL);
         let new_clk_ctr = (clk_ctr & !(1 << 11)) | (1 << 11);
         core::ptr::write_volatile(CLOCK_PERI_CTRL, new_clk_ctr);
@@ -493,14 +585,61 @@ unsafe fn route_clk_peri_to_clk_sys() {
             core::hint::spin_loop();
         }
 
-        // Route to clk_sys
-        let clk_ctr = core::ptr::read_volatile(CLOCK_PERI_CTRL);
-        let new_clk_ctr = (clk_ctr & !(0b111 << 5)) | (CLOCK_PERI_CTRL_AUXSRC_VALUE << 5);
-        core::ptr::write_volatile(CLOCK_PERI_CTRL, new_clk_ctr);
-
         // There's nothing to wait since there's only one mux controlled by AUXSRC
         //            +---------+
         // AUXSRC --->|  MUX    |----> clk_peri
         //            +---------+
+    }
+}
+
+unsafe fn init_gpio16_output() {
+    const RESETS_BASE: u32 = 0x4002_0000;
+    const RESETS_RESET: *mut u32 = (RESETS_BASE + 0x00) as *mut u32;
+    const RESETS_RESET_DONE: *const u32 = (RESETS_BASE + 0x08) as *const u32;
+    const IO_BANK0_RESET: u32 = 1 << 6;
+    const PADS_BANK0_RESET: u32 = 1 << 9;
+    const GPIO_RESETS: u32 = IO_BANK0_RESET | PADS_BANK0_RESET;
+
+    const IO_BANK0_BASE: u32 = 0x4002_8000;
+    const GPIO16_CTRL: *mut u32 = (IO_BANK0_BASE + 0x84) as *mut u32;
+
+    const PADS_BANK0_BASE: u32 = 0x4003_8000;
+    const GPIO16_PAD: *mut u32 = (PADS_BANK0_BASE + 0x44) as *mut u32;
+    const PAD_ISO: u32 = 1 << 8;
+    const PAD_OD: u32 = 1 << 7;
+    const PAD_IE: u32 = 1 << 6;
+
+    const SIO_BASE: u32 = 0xd000_0000;
+    const GPIO_OUT_CLR: *mut u32 = (SIO_BASE + 0x20) as *mut u32;
+    const GPIO_OE_SET: *mut u32 = (SIO_BASE + 0x38) as *mut u32;
+
+    const GPIO16: u32 = 1 << 16;
+    const FUNCSEL_SIO: u32 = 5;
+
+    unsafe {
+        // Match lab 011: reset and release both GPIO control blocks, then wait
+        // until the reset controller confirms that they are usable.
+        let reset = core::ptr::read_volatile(RESETS_RESET);
+        core::ptr::write_volatile(RESETS_RESET, reset | GPIO_RESETS);
+
+        let reset = core::ptr::read_volatile(RESETS_RESET);
+        core::ptr::write_volatile(RESETS_RESET, reset & !GPIO_RESETS);
+
+        while core::ptr::read_volatile(RESETS_RESET_DONE) & GPIO_RESETS != GPIO_RESETS {
+            core::hint::spin_loop();
+        }
+
+        // Select SIO as GPIO16's controller.
+        let ctrl = core::ptr::read_volatile(GPIO16_CTRL);
+        core::ptr::write_volatile(GPIO16_CTRL, (ctrl & !0x1f) | FUNCSEL_SIO);
+
+        // Match lab 011's physical pad setup: remove isolation, enable output,
+        // and leave the input buffer enabled.
+        let pad = core::ptr::read_volatile(GPIO16_PAD);
+        let pad = (pad & !(PAD_ISO | PAD_OD)) | PAD_IE;
+        core::ptr::write_volatile(GPIO16_PAD, pad);
+
+        core::ptr::write_volatile(GPIO_OUT_CLR, GPIO16);
+        core::ptr::write_volatile(GPIO_OE_SET, GPIO16);
     }
 }

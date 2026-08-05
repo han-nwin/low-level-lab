@@ -2,10 +2,26 @@
 target = "thumbv8m.main-none-eabihf"
 
 [target.thumbv8m.main-none-eabihf]
+runner = [
+  "picotool",
+  "load",
+  "-v",
+  "-x",
+  "-t",
+  "elf",
+]
+# If we have a debug probe
+#  runner = [
+#   "probe-rs",
+#   "run",
+#   "--chip",
+#   "RP235x",
+#   "--log-format=oneline",
+# ]
 rustflags = [
   "-C", "target-cpu=cortex-m33", # target chip
   "-C", "link-arg=-Tlink.x", # tell linker to use link.x
   "-C", "link-arg=--nmagic", # prevent padding memory
+  "-C", "link-arg=-Tdefmt.x", # link defmt
 ]
 linker ="rust-lld"
-
