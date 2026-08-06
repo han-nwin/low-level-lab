@@ -3,6 +3,7 @@
 
 use cortex_m as _;
 use cortex_m_rt::entry;
+use defmt_rtt as _;
 use panic_probe as _;
 
 #[used]
@@ -80,11 +81,12 @@ fn main() -> ! {
 
     // 3. Configure SPI1 (disable -> config -> enable)
     const SPI1_BASE: u32 = 0x4008_8000_u32;
-    const SSPCR0: *mut u32 = (SPI1_BASE + 0x00) as *mut u32;
+    const SSPCR0: *mut u32 = (SPI1_BASE) as *mut u32;
     const SSPCR1: *mut u32 = (SPI1_BASE + 0x04) as *mut u32;
-    const SSPDR: *mut u32 = (SPI1_BASE + 0x08) as *mut u32;
     const SSPSR: *mut u32 = (SPI1_BASE + 0x0c) as *mut u32;
     const SSPCPSR: *mut u32 = (SPI1_BASE + 0x10) as *mut u32;
+
+    const SSPSR_BSY: u32 = 1 << 4;
 
     unsafe {
         // 1. Reset then enable SPI peri
@@ -177,12 +179,13 @@ fn main() -> ! {
         core::ptr::write_volatile(SSPCR1, new_sspcr1);
 
         // 3.2 Configure clock speed
-        // NOTE: SPI clock = SSPCLK / (CPSDVSR x (1 + SCR))
-        // We want SPI lock = 1MHz
-        // SSPCLK = clk_sys = 150Mhz (can be overclocked)
-        // Plan:
-        // Set SCR = 0
-        // Set CPSDVSR = 150Mhz
+        // NOTE: SPI clock = clk_peri / (CPSDVSR × (1 + SCR))
+        // RP2350 attachs clk_peri to clk_sys by default, unless we configure. Check lab13
+        // ASSUMPTION:
+        // CPSDVSR = 150 (a unitless divider, not 150 MHz)
+        // SCR = 0
+        // IF clk_peri = 150 MHz:
+        // SPI clock = 150 MHz / 150 = 1 MHz
 
         // SCR comes from SSPCR0: serial clock rate
         let control = core::ptr::read_volatile(SSPCR0);
@@ -190,6 +193,7 @@ fn main() -> ! {
         core::ptr::write_volatile(SSPCR0, new_control);
 
         // CPSDVSR comes from SSPCPSR : clock prescale divisor
+        // set it to 150
         let clock_prescale = core::ptr::read_volatile(SSPCPSR);
         let new_clock_prescale = (clock_prescale & !(0b1111_1111)) | 150_u32;
         core::ptr::write_volatile(SSPCPSR, new_clock_prescale);
@@ -213,7 +217,7 @@ fn main() -> ! {
         // idle = 0
         // First transition goes: Low -> High
         let cr0 = core::ptr::read_volatile(SSPCR0);
-        let new_cr0 = cr0 & !(0b11 << 6); // set SPO = 00
+        let new_cr0 = cr0 & !(0b1 << 6); // set SPO = 00
         core::ptr::write_volatile(SSPCR0, new_cr0);
 
         // 3.6 Configure SPH in SSPCR0: Phase
@@ -225,7 +229,7 @@ fn main() -> ! {
         // =====[sample]=======
         // The slave read data on the first edge
         let cr0 = core::ptr::read_volatile(SSPCR0);
-        let new_cr0 = cr0 & !(0b11 << 7); // set SPH = 00
+        let new_cr0 = cr0 & !(0b1 << 7); // set SPH = 00
         core::ptr::write_volatile(SSPCR0, new_cr0);
 
         // 3.7. Enable SPI: Use SSPCR1
@@ -233,10 +237,99 @@ fn main() -> ! {
         let new_sspcr1 = (sspcr1 & !(1 << 1)) | (1 << 1); // SSE = 1: enable SPI
         core::ptr::write_volatile(SSPCR1, new_sspcr1);
 
-        // 4. Implement byte transfer
-        // 5. Test SPI before RFID
-        // 6. Add RFID driver
-    }
+        // 5. Add RFID driver, and confirm it's connected
+        //   RC522 pin    Connect to RP2350     Purpose
+        // ━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        //  SDA / SS     GP13                  Manual active-low chip select
+        // ───────────  ────────────────────  ───────────────────────────────
+        //  SCK          GP10                  SPI1 clock
+        // ───────────  ────────────────────  ───────────────────────────────
+        //  MOSI         GP11                  SPI1 TX
+        // ───────────  ────────────────────  ───────────────────────────────
+        //  MISO         GP12                  SPI1 RX
+        // ───────────  ────────────────────  ───────────────────────────────
+        //  IRQ          Leave disconnected    Not needed for polling
+        // ───────────  ────────────────────  ───────────────────────────────
+        //  GND          GND                   Common ground
+        // ───────────  ────────────────────  ───────────────────────────────
+        //  RST          3.3 V initially       Keep reader out of reset| can be controlled by a GPIO
+        // ───────────  ────────────────────  ───────────────────────────────
+        //  3.3V         3.3 V                 Module power
 
-    loop {}
+        // 5.1 Clear GP13 to select the RC522
+        core::ptr::write_volatile(GPIO_OUT_CLR, GP13_CS_MASK);
+
+        // 5.2 Read VersionReg in the RC522
+        // Table 8 in RC522 Datasheet
+        //  bit 7:    1 = read, 0 = write
+        // bits 6:1: register address
+        // bit 0:    always 0
+        //
+        // Since VersionReg address is 0x37
+        // Send encoded VersionReg to the RC522
+        let command_to_read_to_version_reg = (1 << 7) | (0x37 << 1);
+        let _discard = spi_transfer_byte(command_to_read_to_version_reg);
+
+        // 5.3 Send some dummy data to generate clocks and receive the value
+        let version = spi_transfer_byte(0x00);
+
+        // 5.4 wait for the transmitting to finished. AKA SSPSR.BSY = 0a
+        while core::ptr::read_volatile(SSPSR) & SSPSR_BSY != 0 {
+            core::hint::spin_loop();
+        }
+
+        // 5.5 Delelect Gp13
+        core::ptr::write_volatile(GPIO_OUT_SET, GP13_CS_MASK);
+
+        // 5.6 log
+        defmt::info!("RC522 version: {}", version);
+
+        loop {
+            defmt::info!("RC522 version: {}", version);
+            cortex_m::asm::delay(100_000);
+        }
+    }
+}
+
+// 4. Implement byte transfer
+// NOTE:   Because SPI is full duplex, every transmitted frame also creates one received frame.
+// Therefore:
+// one write to SSPDR → eventually one readable value in SSPDR
+// Even if you only want to write to the RFID module, you still need to
+// read and discard the corresponding received byte so the RX FIFO
+// doesn’t fill up.
+unsafe fn spi_transfer_byte(tx: u8) -> u8 {
+    //                 SSPDR
+    //                /     \
+    // CPU writes → TX FIFO  RX FIFO → CPU reads
+    //                |         ^
+    //                v         |
+    //              MOSI      MISO
+    const SPI1_BASE: u32 = 0x4008_8000_u32;
+    // we read/write data here. 16bits 15:0. 2bytes
+    // But since we configure DSS 0b0111 = 8bits frame
+    // we can only use 7:0. 8bits = 1 byte data in SSPDR
+    const SSPDR: *mut u32 = (SPI1_BASE + 0x08) as *mut u32; // for read/write data
+
+    const SSPSR: *const u32 = (SPI1_BASE + 0x0c) as *const u32; //readonly. To check status
+    const SSPSR_RNE: u32 = 1 << 2; // Receive FIFO not empty
+    const SSPSR_TNF: u32 = 1 << 1; // Transmit FIFO not full
+
+    unsafe {
+        //wait until there is room in the transmit FIFO
+        while core::ptr::read_volatile(SSPSR) & SSPSR_TNF == 0 {
+            core::hint::spin_loop();
+        }
+
+        // Place outgoing byte in the transmit FIFO
+        core::ptr::write_volatile(SSPDR, tx as u32);
+
+        // wait till the received byte enters the receive FIFO
+        while core::ptr::read_volatile(SSPSR) & SSPSR_RNE == 0 {
+            core::hint::spin_loop();
+        }
+
+        // SSPDR reads from the receive FIFO
+        core::ptr::read_volatile(SSPDR) as u8
+    }
 }
