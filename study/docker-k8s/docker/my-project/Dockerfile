@@ -5,7 +5,7 @@ FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* # remove packages list. Reduce image size
 
 # Set the working directory
 WORKDIR /my-docker-app
