@@ -170,7 +170,7 @@ fn main() -> ! {
         core::ptr::write_volatile(GPIO_OE_SET, GP13_CS_MASK); // set as output
 
         // 3. Configure SPI controller
-        // 3.1 Disable SPI first
+        // 3.1 Disable SPI first: Use SSPCR1
         // disable synschronous serial port
         let sspcr1 = core::ptr::read_volatile(SSPCR1);
         let new_sspcr1 = sspcr1 & !(1 << 1); // SSE = 0: disable SPI
@@ -194,12 +194,45 @@ fn main() -> ! {
         let new_clock_prescale = (clock_prescale & !(0b1111_1111)) | 150_u32;
         core::ptr::write_volatile(SSPCPSR, new_clock_prescale);
 
-        // 3.3 Configure SSPCR0
-        // 3.4 Configure SSPCR1
-        // 3.5. Enable SPI
+        // 3.3 Configure DSS in SSPCR0: Data size
+        // How many bits make up one transfer? 8 bits
+        let cr0 = core::ptr::read_volatile(SSPCR0);
+        let new_cr0 = (cr0 & !(0b1111)) | (0b0111); // set DSS = 8
+        core::ptr::write_volatile(SSPCR0, new_cr0);
 
-        //
-        //
+        // 3.4 Configure FRF in SSPCR0: Format
+        // just use the motorola format
+        let cr0 = core::ptr::read_volatile(SSPCR0);
+        let new_cr0 = cr0 & !(0b11 << 4); // set FRF = 00
+        core::ptr::write_volatile(SSPCR0, new_cr0);
+
+        // 3.5 Configure SPO in SSPCR0: Idle level
+        // SP0 = 0: CLock is idle LOW
+        //       ___     ___
+        // _____|   |___|   |____
+        // idle = 0
+        // First transition goes: Low -> High
+        let cr0 = core::ptr::read_volatile(SSPCR0);
+        let new_cr0 = cr0 & !(0b11 << 6); // set SPO = 00
+        core::ptr::write_volatile(SSPCR0, new_cr0);
+
+        // 3.6 Configure SPH in SSPCR0: Phase
+        // Controls when data is sampled relative
+        // SPH = 0
+        //       ^       ^
+        // ______|_______|______
+        // DATA:
+        // =====[sample]=======
+        // The slave read data on the first edge
+        let cr0 = core::ptr::read_volatile(SSPCR0);
+        let new_cr0 = cr0 & !(0b11 << 7); // set SPH = 00
+        core::ptr::write_volatile(SSPCR0, new_cr0);
+
+        // 3.7. Enable SPI: Use SSPCR1
+        let sspcr1 = core::ptr::read_volatile(SSPCR1);
+        let new_sspcr1 = (sspcr1 & !(1 << 1)) | (1 << 1); // SSE = 1: enable SPI
+        core::ptr::write_volatile(SSPCR1, new_sspcr1);
+
         // 4. Implement byte transfer
         // 5. Test SPI before RFID
         // 6. Add RFID driver
