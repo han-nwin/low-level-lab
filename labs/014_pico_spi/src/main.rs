@@ -77,9 +77,8 @@ fn main() -> ! {
     const GPIO_OE_SET: *mut u32 = (SIO_BASE + 0x38) as *mut u32;
 
     const GP13_CS_MASK: u32 = 1 << 13; // chip select mask
-    //
 
-    // 3. Configure SPI1
+    // 3. Configure SPI1 (disable -> config -> enable)
     const SPI1_BASE: u32 = 0x4008_8000_u32;
     const SSPCR0: *mut u32 = (SPI1_BASE + 0x00) as *mut u32;
     const SSPCR1: *mut u32 = (SPI1_BASE + 0x04) as *mut u32;
@@ -197,11 +196,13 @@ fn main() -> ! {
 
         // 3.3 Configure SSPCR0
         // 3.4 Configure SSPCR1
+        // 3.5. Enable SPI
 
-        // 4. Enable SPI
-        // 5. Implement byte transfer
-        // 6. Test SPI before RFID
-        // 7. Add RFID driver
+        //
+        //
+        // 4. Implement byte transfer
+        // 5. Test SPI before RFID
+        // 6. Add RFID driver
     }
 
     loop {}
