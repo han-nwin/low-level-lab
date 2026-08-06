@@ -171,6 +171,33 @@ fn main() -> ! {
         core::ptr::write_volatile(GPIO_OE_SET, GP13_CS_MASK); // set as output
 
         // 3. Configure SPI controller
+        // 3.1 Disable SPI first
+        // disable synschronous serial port
+        let sspcr1 = core::ptr::read_volatile(SSPCR1);
+        let new_sspcr1 = sspcr1 & !(1 << 1); // SSE = 0: disable SPI
+        core::ptr::write_volatile(SSPCR1, new_sspcr1);
+
+        // 3.2 Configure clock speed
+        // NOTE: SPI clock = SSPCLK / (CPSDVSR x (1 + SCR))
+        // We want SPI lock = 1MHz
+        // SSPCLK = clk_sys = 150Mhz (can be overclocked)
+        // Plan:
+        // Set SCR = 0
+        // Set CPSDVSR = 150Mhz
+
+        // SCR comes from SSPCR0: serial clock rate
+        let control = core::ptr::read_volatile(SSPCR0);
+        let new_control = control & !(0b1111_1111 << 8); // set SCR = 0 
+        core::ptr::write_volatile(SSPCR0, new_control);
+
+        // CPSDVSR comes from SSPCPSR : clock prescale divisor
+        let clock_prescale = core::ptr::read_volatile(SSPCPSR);
+        let new_clock_prescale = (clock_prescale & !(0b1111_1111)) | 150_u32;
+        core::ptr::write_volatile(SSPCPSR, new_clock_prescale);
+
+        // 3.3 Configure SSPCR0
+        // 3.4 Configure SSPCR1
+
         // 4. Enable SPI
         // 5. Implement byte transfer
         // 6. Test SPI before RFID
