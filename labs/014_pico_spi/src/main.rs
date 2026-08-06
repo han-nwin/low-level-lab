@@ -77,6 +77,15 @@ fn main() -> ! {
     const GPIO_OE_SET: *mut u32 = (SIO_BASE + 0x38) as *mut u32;
 
     const GP13_CS_MASK: u32 = 1 << 13; // chip select mask
+    //
+
+    // 3. Configure SPI1
+    const SPI1_BASE: u32 = 0x4008_8000_u32;
+    const SSPCR0: *mut u32 = (SPI1_BASE + 0x00) as *mut u32;
+    const SSPCR1: *mut u32 = (SPI1_BASE + 0x04) as *mut u32;
+    const SSPDR: *mut u32 = (SPI1_BASE + 0x08) as *mut u32;
+    const SSPSR: *mut u32 = (SPI1_BASE + 0x0c) as *mut u32;
+    const SSPCPSR: *mut u32 = (SPI1_BASE + 0x10) as *mut u32;
 
     unsafe {
         // 1. Reset then enable SPI peri
