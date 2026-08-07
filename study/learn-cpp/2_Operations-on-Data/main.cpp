@@ -10,8 +10,11 @@ int main() {
     std::cout << "a / b = " << a / b << ", remainder = " << a % b << '\n';
 
     int value{10};
-    value += 3; // compound assignment; equivalent to value = value + 3
-    ++value;    // increment before the value is used
+    value += 3;         // compound assignment; equivalent to value = value + 3
+    ++value;            // increment before the value is used
+    int test = value++; // increment after the value is used
+
+    std::printf("value=%d, test=%d\n", value, test);
 
     // Comparisons produce bool. Logical operators combine boolean expressions.
     const bool in_range = value >= 10 && value <= 20;
