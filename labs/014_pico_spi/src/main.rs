@@ -46,52 +46,52 @@ static METADATA: [u32; 1] = [u32::from_le_bytes(*b"Han!")];
 //
 //               internal hardware
 //               SPI controller
+
+// GP10 -> SPI1 SCK
+// GP11 -> SPI1 TX
+// GP12 -> SPI1 RX
+// GP13 -> SPI1 CSn
+
+// 1. RESET
+const RESETS_BASE: u32 = 0x4002_0000_u32;
+const RESETS_RESET: *mut u32 = (RESETS_BASE) as *mut u32;
+const RESETS_RESET_DONE: *const u32 = (RESETS_BASE + 0x08) as *const u32; // readonly
+const SPI1_RESET_OFFSET: u32 = (1 << 19) as u32;
+
+// 2. Configure GPIO
+const IO_BANK0_BASE: u32 = 0x4002_8000_u32;
+const GP10_CTRL: *mut u32 = (IO_BANK0_BASE + 0x54) as *mut u32;
+const GP11_CTRL: *mut u32 = (IO_BANK0_BASE + 0x5c) as *mut u32;
+const GP12_CTRL: *mut u32 = (IO_BANK0_BASE + 0x64) as *mut u32;
+const GP13_CTRL: *mut u32 = (IO_BANK0_BASE + 0x6c) as *mut u32;
+
+const PAD_BANK0_BASE: u32 = 0x4003_8000_u32;
+const GPIO10_PAD: *mut u32 = (PAD_BANK0_BASE + 0x2c) as *mut u32;
+const GPIO11_PAD: *mut u32 = (PAD_BANK0_BASE + 0x30) as *mut u32;
+const GPIO12_PAD: *mut u32 = (PAD_BANK0_BASE + 0x34) as *mut u32;
+const GPIO13_PAD: *mut u32 = (PAD_BANK0_BASE + 0x38) as *mut u32;
+
+// SIO for GP13
+const SIO_BASE: u32 = 0xd000_0000_u32;
+const GPIO_OUT_SET: *mut u32 = (SIO_BASE + 0x18) as *mut u32;
+const GPIO_OUT_CLR: *mut u32 = (SIO_BASE + 0x20) as *mut u32;
+const GPIO_OE_SET: *mut u32 = (SIO_BASE + 0x38) as *mut u32;
+
+const GP13_CS_MASK: u32 = 1 << 13; // chip select mask
+
+// 3. Configure SPI1 (disable -> config -> enable)
+const SPI1_BASE: u32 = 0x4008_8000_u32;
+const SSPCR0: *mut u32 = (SPI1_BASE) as *mut u32;
+const SSPCR1: *mut u32 = (SPI1_BASE + 0x04) as *mut u32;
+const SSPSR: *mut u32 = (SPI1_BASE + 0x0c) as *mut u32;
+const SSPCPSR: *mut u32 = (SPI1_BASE + 0x10) as *mut u32;
+
+const SSPSR_BSY: u32 = 1 << 4;
 #[entry]
 fn main() -> ! {
     // CHEAT: use rp235x-hal for USB logging while the lab itself stays
     // register-level. Keep polling USB in the main loop below.
     logging::init();
-
-    // GP10 -> SPI1 SCK
-    // GP11 -> SPI1 TX
-    // GP12 -> SPI1 RX
-    // GP13 -> SPI1 CSn
-
-    // 1. RESET
-    const RESETS_BASE: u32 = 0x4002_0000_u32;
-    const RESETS_RESET: *mut u32 = (RESETS_BASE) as *mut u32;
-    const RESETS_RESET_DONE: *const u32 = (RESETS_BASE + 0x08) as *const u32; // readonly
-    const SPI1_RESET_OFFSET: u32 = (1 << 19) as u32;
-
-    // 2. Configure GPIO
-    const IO_BANK0_BASE: u32 = 0x4002_8000_u32;
-    const GP10_CTRL: *mut u32 = (IO_BANK0_BASE + 0x54) as *mut u32;
-    const GP11_CTRL: *mut u32 = (IO_BANK0_BASE + 0x5c) as *mut u32;
-    const GP12_CTRL: *mut u32 = (IO_BANK0_BASE + 0x64) as *mut u32;
-    const GP13_CTRL: *mut u32 = (IO_BANK0_BASE + 0x6c) as *mut u32;
-
-    const PAD_BANK0_BASE: u32 = 0x4003_8000_u32;
-    const GPIO10_PAD: *mut u32 = (PAD_BANK0_BASE + 0x2c) as *mut u32;
-    const GPIO11_PAD: *mut u32 = (PAD_BANK0_BASE + 0x30) as *mut u32;
-    const GPIO12_PAD: *mut u32 = (PAD_BANK0_BASE + 0x34) as *mut u32;
-    const GPIO13_PAD: *mut u32 = (PAD_BANK0_BASE + 0x38) as *mut u32;
-
-    // SIO for GP13
-    const SIO_BASE: u32 = 0xd000_0000_u32;
-    const GPIO_OUT_SET: *mut u32 = (SIO_BASE + 0x18) as *mut u32;
-    const GPIO_OUT_CLR: *mut u32 = (SIO_BASE + 0x20) as *mut u32;
-    const GPIO_OE_SET: *mut u32 = (SIO_BASE + 0x38) as *mut u32;
-
-    const GP13_CS_MASK: u32 = 1 << 13; // chip select mask
-
-    // 3. Configure SPI1 (disable -> config -> enable)
-    const SPI1_BASE: u32 = 0x4008_8000_u32;
-    const SSPCR0: *mut u32 = (SPI1_BASE) as *mut u32;
-    const SSPCR1: *mut u32 = (SPI1_BASE + 0x04) as *mut u32;
-    const SSPSR: *mut u32 = (SPI1_BASE + 0x0c) as *mut u32;
-    const SSPCPSR: *mut u32 = (SPI1_BASE + 0x10) as *mut u32;
-
-    const SSPSR_BSY: u32 = 1 << 4;
 
     unsafe {
         // 1. Reset then enable SPI peri
@@ -261,33 +261,13 @@ fn main() -> ! {
         // ───────────  ────────────────────  ───────────────────────────────
         //  3.3V         3.3 V                 Module power
 
-        // 5.1 Clear GP13 to select the RC522
-        core::ptr::write_volatile(GPIO_OUT_CLR, GP13_CS_MASK);
+        // 5.1 Since VersionReg address is 0x37
+        let version = read_rc522_register(0x37);
 
-        // 5.2 Read VersionReg in the RC522
-        // Table 8 in RC522 Datasheet
-        //  bit 7:    1 = read, 0 = write
-        // bits 6:1: register address
-        // bit 0:    always 0
-        //
-        // Since VersionReg address is 0x37
-        // Send encoded VersionReg to the RC522
-        let command_to_read_to_version_reg = (1 << 7) | (0x37 << 1);
-        let _discard = spi_transfer_byte(command_to_read_to_version_reg);
-
-        // 5.3 Send some dummy data to generate clocks and receive the value
-        let version = spi_transfer_byte(0x00);
-
-        // 5.4 wait for the transmitting to finished. AKA SSPSR.BSY = 0a
-        while core::ptr::read_volatile(SSPSR) & SSPSR_BSY != 0 {
-            core::hint::spin_loop();
-        }
-
-        // 5.5 Delelect Gp13
-        core::ptr::write_volatile(GPIO_OUT_SET, GP13_CS_MASK);
-
-        // 5.6 log
+        // 5.2 log
         logln!("RC522 version: 0x{:02x}", version);
+
+        // 6. Reading the data from the RC522 (scan a card)
 
         let mut log_countdown = 1_000;
         loop {
@@ -346,5 +326,59 @@ unsafe fn spi_transfer_byte(tx: u8) -> u8 {
 
         // SSPDR reads from the receive FIFO
         core::ptr::read_volatile(SSPDR) as u8
+    }
+}
+
+unsafe fn read_rc522_register(reg: u8) -> u8 {
+    unsafe {
+        // 1. Clear GP13 to select the RC522
+        core::ptr::write_volatile(GPIO_OUT_CLR, GP13_CS_MASK);
+
+        // 2. read/write to register
+        // Table 8 in RC522 Datasheet
+        // bit 7:    1 = read, 0 = write
+        // bits 6:1: register address
+        // bit 0:    always 0
+        let read_command = (1 << 7) | (reg << 1);
+        let _discard = spi_transfer_byte(read_command);
+
+        // 3. Send some dummy data to generate clocks and receive the value
+        let data = spi_transfer_byte(0x00);
+
+        // 4. wait for the transmitting to finished. AKA SSPSR.BSY = 0a
+        while core::ptr::read_volatile(SSPSR) & SSPSR_BSY != 0 {
+            core::hint::spin_loop();
+        }
+
+        // 5. Delelect Gp13
+        core::ptr::write_volatile(GPIO_OUT_SET, GP13_CS_MASK);
+
+        data
+    }
+}
+
+unsafe fn write_rc522_register(reg: u8, data: u8) {
+    unsafe {
+        // 1. Clear GP13 to select the RC522
+        core::ptr::write_volatile(GPIO_OUT_CLR, GP13_CS_MASK);
+
+        // 2. read/write to register
+        // Table 8 in RC522 Datasheet
+        // bit 7:    1 = read, 0 = write
+        // bits 6:1: register address
+        // bit 0:    always 0
+        let command_to_write_to_version_reg = (1 << 7) | (reg << 1);
+        let _discard = spi_transfer_byte(command_to_write_to_version_reg);
+
+        // 3. Send the data
+        spi_transfer_byte(data);
+
+        // 4. wait for the transmitting to finished. AKA SSPSR.BSY = 0a
+        while core::ptr::read_volatile(SSPSR) & SSPSR_BSY != 0 {
+            core::hint::spin_loop();
+        }
+
+        // 5. Delelect Gp13
+        core::ptr::write_volatile(GPIO_OUT_SET, GP13_CS_MASK);
     }
 }
