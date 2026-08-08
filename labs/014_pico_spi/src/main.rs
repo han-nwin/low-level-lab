@@ -334,7 +334,7 @@ unsafe fn read_rc522_register(reg: u8) -> u8 {
         // 1. Clear GP13 to select the RC522
         core::ptr::write_volatile(GPIO_OUT_CLR, GP13_CS_MASK);
 
-        // 2. read/write to register
+        // 2. read from register
         // Table 8 in RC522 Datasheet
         // bit 7:    1 = read, 0 = write
         // bits 6:1: register address
@@ -362,13 +362,13 @@ unsafe fn write_rc522_register(reg: u8, data: u8) {
         // 1. Clear GP13 to select the RC522
         core::ptr::write_volatile(GPIO_OUT_CLR, GP13_CS_MASK);
 
-        // 2. read/write to register
+        // 2. write to register
         // Table 8 in RC522 Datasheet
         // bit 7:    1 = read, 0 = write
         // bits 6:1: register address
         // bit 0:    always 0
-        let command_to_write_to_version_reg = (1 << 7) | (reg << 1);
-        let _discard = spi_transfer_byte(command_to_write_to_version_reg);
+        let write_command = (0 << 7) | (reg << 1);
+        let _discard = spi_transfer_byte(write_command);
 
         // 3. Send the data
         spi_transfer_byte(data);
