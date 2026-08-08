@@ -13,9 +13,11 @@ const XTAL_FREQ_HZ: u32 = 12_000_000;
 /// Configure the clocks and expose the RP2350 USB peripheral as a CDC serial
 /// port. This intentionally uses the HAL so the labs can stay register-level.
 pub fn init() {
+    // moves the low-level WATCHDOG peripheral handle into a higher-level HAL object
     let mut peripherals = hal::pac::Peripherals::take().unwrap();
     let mut watchdog = hal::Watchdog::new(peripherals.WATCHDOG);
 
+    // Configure the chip clock
     let clocks = hal::clocks::init_clocks_and_plls(
         XTAL_FREQ_HZ,
         peripherals.XOSC,
@@ -27,6 +29,17 @@ pub fn init() {
     )
     .expect("clock initialization failed");
 
+    // Initialize USB serial console
+    // After this call, the USB controller can present itself to
+    // the computer as a CDC serial device.
+    //
+    // Initialization alone is insufficient because this is a
+    // polled USB implementation. The program repeatedly calls:
+    //
+    // logging::poll();
+    //
+    // at src/main.rs:296. That advances USB communication and
+    // sends buffered log output.
     RpUsbConsole::init(
         peripherals.USB,
         peripherals.USB_DPRAM,
@@ -35,6 +48,18 @@ pub fn init() {
     );
 }
 
+//            logging::poll()
+//                  │
+//        ┌─────────┴─────────┐
+//        ▼                   ▼
+//   Mac → Pico           Pico → Mac
+//        │                   │
+//        ▼                   ▼
+//    RX queue            TX queue
+//        │                   ▲
+//        ▼                   │
+// logging::read()          logln!()
+
 /// Advance USB enumeration and flush buffered log messages.
 #[inline]
 pub fn poll() {
@@ -42,11 +67,15 @@ pub fn poll() {
 }
 
 /// Read bytes sent by the host. `poll()` must be called regularly first.
+/// Use to read bytes comming into the MCU
 #[allow(dead_code)]
 pub fn read(buffer: &mut [u8]) -> usize {
     RpUsbConsole::read(buffer)
 }
 
+//  - $arg is a metavariable.
+// - :tt means one token tree.
+// - $( ... )* means repeat the enclosed pattern zero or more times.
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {

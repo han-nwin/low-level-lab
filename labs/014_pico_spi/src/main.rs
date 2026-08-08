@@ -59,7 +59,7 @@ fn main() -> ! {
 
     // 1. RESET
     const RESETS_BASE: u32 = 0x4002_0000_u32;
-    const RESETS_RESET: *mut u32 = (RESETS_BASE + 0x00) as *mut u32;
+    const RESETS_RESET: *mut u32 = (RESETS_BASE) as *mut u32;
     const RESETS_RESET_DONE: *const u32 = (RESETS_BASE + 0x08) as *const u32; // readonly
     const SPI1_RESET_OFFSET: u32 = (1 << 19) as u32;
 
