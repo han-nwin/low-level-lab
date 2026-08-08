@@ -3,8 +3,9 @@
 
 use cortex_m as _;
 use cortex_m_rt::entry;
-use defmt_rtt as _;
-use panic_probe as _;
+use panic_halt as _;
+
+mod logging;
 
 #[used]
 #[unsafe(link_section = ".start_block")]
@@ -47,6 +48,10 @@ static METADATA: [u32; 1] = [u32::from_le_bytes(*b"Han!")];
 //               SPI controller
 #[entry]
 fn main() -> ! {
+    // CHEAT: use rp235x-hal for USB logging while the lab itself stays
+    // register-level. Keep polling USB in the main loop below.
+    logging::init();
+
     // GP10 -> SPI1 SCK
     // GP11 -> SPI1 TX
     // GP12 -> SPI1 RX
@@ -101,7 +106,7 @@ fn main() -> ! {
         while core::ptr::read_volatile(RESETS_RESET_DONE) & SPI1_RESET_OFFSET != SPI1_RESET_OFFSET {
             time_out -= 1;
             if time_out <= 0 {
-                defmt::panic!("SPI1 reset timeout")
+                panic!("SPI1 reset timeout")
             }
             core::hint::spin_loop();
         }
@@ -282,11 +287,21 @@ fn main() -> ! {
         core::ptr::write_volatile(GPIO_OUT_SET, GP13_CS_MASK);
 
         // 5.6 log
-        defmt::info!("RC522 version: {}", version);
+        logln!("RC522 version: 0x{:02x}", version);
 
+        let mut log_countdown = 1_000;
         loop {
-            defmt::info!("RC522 version: {}", version);
+            // USB is a polled protocol. Calling this often lets the Mac
+            // enumerate the device and drains queued log messages.
+            logging::poll();
+
             cortex_m::asm::delay(100_000);
+
+            log_countdown -= 1;
+            if log_countdown == 0 {
+                logln!("RC522 version: 0x{:02x}", version);
+                log_countdown = 1_000;
+            }
         }
     }
 }
