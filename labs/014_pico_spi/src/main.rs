@@ -243,6 +243,7 @@ fn main() -> ! {
         core::ptr::write_volatile(SSPCR1, new_sspcr1);
 
         // 5. Add RFID driver, and confirm it's connected
+        // Read VersionReg
         //   RC522 pin    Connect to RP2350     Purpose
         // ━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         //  SDA / SS     GP13                  Manual active-low chip select
@@ -263,23 +264,52 @@ fn main() -> ! {
 
         // 5.1 Since VersionReg address is 0x37
         let version = read_rc522_register(0x37);
-
         // 5.2 log
         logln!("RC522 version: 0x{:02x}", version);
 
-        // 6. Reading the data from the RC522 (scan a card)
+        // 6. Write the data to the RC522
+        // 0x0B: WaterLevelReg
+        // Writable bits: 5:0
+        // Reset value: 0x08
+        let original_water = read_rc522_register(0x0B);
+        write_rc522_register(0x0B, 0x33); // Write 33
+        let new_water = read_rc522_register(0x0B);
+        logln!(
+            "WaterLevelReg: 0x{:02x} -> 0x{:02x}",
+            original_water,
+            new_water
+        );
+        write_rc522_register(0x0B, original_water);
 
         let mut log_countdown = 1_000;
         loop {
+            // NOTE:
             // USB is a polled protocol. Calling this often lets the Mac
             // enumerate the device and drains queued log messages.
             logging::poll();
-
-            cortex_m::asm::delay(100_000);
+            cortex_m::asm::delay(100_000); // poll every 100k cycles
 
             log_countdown -= 1;
             if log_countdown == 0 {
+                // 5.1 Since VersionReg address is 0x37
+                let version = read_rc522_register(0x37);
+                // 5.2 log
                 logln!("RC522 version: 0x{:02x}", version);
+
+                // 6. Write the data to the RC522
+                // 0x0B: WaterLevelReg
+                // Writable bits: 5:0
+                // Reset value: 0x08
+                let original_water = read_rc522_register(0x0B);
+                write_rc522_register(0x0B, 0x33); // Write 33
+                let new_water = read_rc522_register(0x0B);
+                logln!(
+                    "WaterLevelReg: 0x{:02x} -> 0x{:02x}",
+                    original_water,
+                    new_water
+                );
+                write_rc522_register(0x0B, original_water);
+
                 log_countdown = 1_000;
             }
         }
