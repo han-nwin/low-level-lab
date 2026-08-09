@@ -92,6 +92,7 @@ const IC_TX_ABRT_SOURCE: *const u32 = (I2C1_BASE + 0x80) as *const u32;
 // 0x08 sets P3, commonly the LCD backlight.
 const LCD_RS: u8 = 1 << 0;
 const LCD_EN: u8 = 1 << 2;
+const LCD_RW: u8 = 1 << 1;
 const LCD_BACKLIGHT: u8 = 1 << 3;
 
 #[entry]
