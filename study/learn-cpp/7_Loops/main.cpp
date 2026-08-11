@@ -15,10 +15,15 @@ int main() {
     // copies.
     const std::vector<int> values{2, 4, 6, 8};
     int sum{0};
-    for (const auto &value : values) {
-        if (value == 6)
-            continue;
-        sum += value;
+    for (const int &x : values) {
+        sum += x;
     }
-    std::cout << "sum (excluding 6)=" << sum << '\n';
+    std::println("sum: {}", sum);
+
+    std::vector<float> sets{1.4f, 2.2f, 3.9f, 4.12f};
+    float sum_f(0.0f);
+    for (float &x : sets) {
+        sum_f += x;
+    }
+    std::println("sum_f = {:.2f}", sum_f);
 }

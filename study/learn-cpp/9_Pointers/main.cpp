@@ -14,6 +14,7 @@ int main() {
     if (pointer == nullptr)
         std::cout << "pointer is empty\n";
 
+    // NOTE:
     // Prefer automatic storage and smart pointers. Manual new/delete is shown
     // only to recognize legacy code: int* p = new int{5}; delete p;
 }
