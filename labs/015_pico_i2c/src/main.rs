@@ -95,6 +95,34 @@ const LCD_EN: u8 = 1 << 2;
 const LCD_RW: u8 = 1 << 1;
 const LCD_BACKLIGHT: u8 = 1 << 3;
 
+#[repr(u8)]
+#[derive(Debug, PartialEq, Eq)]
+enum LcdRow {
+    Row1 = 0,
+    Row2 = 1,
+}
+
+#[repr(u8)]
+#[derive(Debug, PartialEq, Eq)]
+enum LcdCol {
+    Col1 = 0,
+    Col2 = 1,
+    Col3 = 2,
+    Col4 = 3,
+    Col5 = 4,
+    Col6 = 5,
+    Col7 = 6,
+    Col8 = 7,
+    Col9 = 8,
+    Col10 = 9,
+    Col11 = 10,
+    Col12 = 11,
+    Col13 = 12,
+    Col14 = 13,
+    Col15 = 14,
+    Col16 = 15,
+}
+
 #[entry]
 fn main() -> ! {
     logging::init(); // logging and configure clock sys to 150MHz
@@ -225,7 +253,7 @@ fn main() -> ! {
         logln!("HLF8574 acknowledged address 0x27");
 
         // Wait for the LCD to finish powering up
-        cortex_m::asm::delay(300_000_000); // 2 seconds at 150 MHz
+        cortex_m::asm::delay(7_500_000);
 
         // NOTE:
         //  This places 0011 on LCD pins D7–D4. It tells the LCD to use 8-bit mode. We
@@ -237,7 +265,13 @@ fn main() -> ! {
         // ============ END startup sequence =========//
 
         // Now send the string with RS = 1:
-        for &character in b"Hello, Pico 2!" {
+        set_cursor(LcdRow::Row1, LcdCol::Col1);
+        for &character in b"Hello, Han!" {
+            lcd_write_byte(character, true);
+        }
+        // go to next row
+        set_cursor(LcdRow::Row2, LcdCol::Col1);
+        for &character in b"How can I help?" {
             lcd_write_byte(character, true);
         }
 
@@ -320,11 +354,39 @@ unsafe fn lcd_write_nibble(nibble: u8, is_data: bool) {
 }
 
 unsafe fn lcd_write_byte(byte: u8, is_data: bool) {
+    // NOTE: each write_byte broken into 2 write_nibble
     unsafe {
         // we write 2 nibbles so break it into 2 write nibbles
         // LCD only take 4bits (1 nibble) write at a time
         lcd_write_nibble(byte >> 4, is_data); // write 4 most signigicant bits
         lcd_write_nibble(byte & 0b0000_1111, is_data); // write last 4 significant bits
+    }
+}
+
+unsafe fn set_cursor(row: LcdRow, column: LcdCol) {
+    // NOTE: each write_byte broken into 2 write_nibble
+    unsafe {
+        // Row 1: 0x00–0x0F
+        // Row 2: 0x40–0x4F
+        let row_address = if row == LcdRow::Row1 { 0x00 } else { 0x40 };
+        // 1. Set the row we wanna write on
+        //  RS = 0  → instruction/command
+        // R/W = 0 → write
+        //
+        // and LCD command bit 7 is 1, the LCD interprets
+        // the remaining seven bits as a DDRAM address:
+        //
+        // bit:  7 6 5 4 3 2 1 0
+        //       1 A A A A A A A
+        //       ↑ └─ DDRAM address
+        //       Set DDRAM Address command
+        // Examples:
+        // 1000_0000 → Row 1, column 0
+        // 1000_0101 → Row 1, column 5
+        // 1100_0000 → Row 2, column 0
+        // 1100_0101 → Row 2, column 5
+        let byte_to_select_row = 0b1000_0000 | (row_address as u8) | column as u8;
+        lcd_write_byte(byte_to_select_row, false);
     }
 }
 
