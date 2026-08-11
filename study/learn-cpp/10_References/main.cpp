@@ -1,5 +1,6 @@
 #include <iostream>
 
+// Usage or reference
 void increment(int &value) { ++value; }              // may modify the caller
 void print(const int &value) { std::cout << value; } // read-only, avoids a copy
 
@@ -9,6 +10,7 @@ int main() {
 
     alias = 20;
     increment(number);
+    increment(alias);
 
     // References must be initialized and normally cannot be reseated. Unlike a
     // pointer, ordinary reference use needs no explicit dereference operator.
