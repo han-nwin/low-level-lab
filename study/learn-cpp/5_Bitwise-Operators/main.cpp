@@ -6,9 +6,15 @@
 using Byte = std::uint8_t;
 
 void print_bits(std::string_view label, Byte value) {
-    std::println("{:<20} {} ({:#04x})", label,
-                 std::bitset<8>{value}.to_string(),
-                 static_cast<unsigned int>(value));
+    // :<20 -> aslign left minimum width = 20
+    // :#04x -> # include 0x prefix
+    //       -> 0: pad with 0s
+    //       -> 4: 4 minimum characters
+    //       -> x: lowercase hex
+    std::println(
+        "{:<20} {} ({:#04x})", label,
+        std::bitset<8>{value}.to_string(), // convert to bits then to string
+        static_cast<unsigned int>(value));
 }
 
 int main() {
@@ -47,14 +53,14 @@ int main() {
     std::println("can execute: {}", (permissions & execute) != 0U);
 
     permissions |= execute; // Set a bit.
-    print_bits("set execute", permissions);
+    print_bits("| set execute", permissions);
 
     // ~ means "not". It flips every bit. The cast back to Byte is needed
     permissions &= static_cast<Byte>(~write); // Clear a bit.
-    print_bits("clear write", permissions);
+    print_bits("& ~ clear write", permissions);
 
     permissions ^= read; // Toggle a bit.
-    print_bits("toggle read", permissions);
+    print_bits("^ toggle read", permissions);
 
     // Masks and shifts can also pack multiple small values into one byte. The
     // upper and lower four-bit groups are commonly called nibbles.
@@ -67,6 +73,6 @@ int main() {
 
     std::println("\nPacking values");
     print_bits("packed", packed);
-    std::println("unpacked high: {:#x}, low: {:#x}", unpacked_high,
+    std::println("unpacked high: {:#04x}, low: {:#04x}", unpacked_high,
                  unpacked_low);
 }
