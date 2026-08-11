@@ -390,6 +390,35 @@ unsafe fn set_cursor(row: LcdRow, column: LcdCol) {
     }
 }
 
+// LCD STARTUP OVERVIEW
+//
+// The Pico does not directly control the LCD pins. It sends an 8-bit value over
+// I2C to the PCF8574 GPIO expander. Each bit controls one physical output:
+//
+//   PCF8574:  P7  P6  P5  P4  P3  P2  P1  P0
+//   LCD:      D7  D6  D5  D4  BL  EN  RW  RS
+//
+// NOTE: we don't control the D pins directly
+//
+// The LCD's "4-bit mode" refers only to LCD data pins D7-D4. It does not refer
+// to the 8-bit I2C value sent to the PCF8574. In 4-bit mode, every LCD byte is
+// sent in two parts:
+//
+//   first EN pulse  -> upper nibble on D7-D4
+//   second EN pulse -> lower nibble on D7-D4
+//
+// At power-up, the LCD may still expect 8-bit transfers. The datasheet startup
+// sequence synchronizes it and then switches it to 4-bit mode:
+//
+//   0x03, 0x03, 0x03 -> force the LCD into a known 8-bit state
+//   0x02             -> switch the LCD to 4-bit mode
+//
+// These are sent as individual nibbles because the LCD is not yet ready to
+// combine two nibbles into one byte. After 0x02, normal commands are sent with
+// lcd_write_byte(), which sends the upper nibble followed by the lower nibble.
+//
+// is_data = false keeps RS low, telling the LCD that these values are commands.
+// Each nibble is accepted on the falling edge of EN.
 unsafe fn startup_sequence() {
     unsafe {
         // NOTE:
