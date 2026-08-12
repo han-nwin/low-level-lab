@@ -56,7 +56,12 @@ using namespace std::chrono_literals;
 // = default; // compiler, generate the normal implementation
 // = delete;  // compiler, forbid this operation
 // noexcept   // this function promises not to throw
-
+// NOTE:
+// Destination  Source  Operation
+// New object  Existing object  Copy constructor
+// New object  Movable object  Move constructor
+// Existing object  Existing object  Copy assignment
+// Existing object  Movable object  Move assignment
 template <typename T> struct ChannelState {
     std::queue<T> messages;
     std::mutex mutex;
