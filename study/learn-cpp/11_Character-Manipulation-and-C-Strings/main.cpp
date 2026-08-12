@@ -18,4 +18,10 @@ int main() {
               << ", capacity=" << sizeof(greeting) << '\n';
     // Prefer std::string for general text; raw C-string functions cannot know
     // the destination capacity and are easy to misuse.
+
+    char yo[20];
+    std::strcpy(yo, "Yo");
+    std::println("{}", yo);
+    std::cout << yo << ", length=" << std::strlen(yo)
+              << ", capacity=" << sizeof(yo) << '\n';
 }
