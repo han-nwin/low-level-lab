@@ -16,7 +16,7 @@ class Resource {
 
   public:
     // Normal constructor
-    Resource(std::string name, int value)
+    explicit Resource(std::string name, int value)
         : name_{std::move(name)}, value_{std::make_unique<int>(value)} {
         std::cout << "normal constructor: " << name_ << '\n';
     }
@@ -43,7 +43,7 @@ class Resource {
     //
     // Resource b{std::move(a)};
     //
-    // noexcept promises that this operation will not throw.
+    // NOTE: noexcept promises that this operation will not throw.
     // Containers such as std::vector prefer a noexcept move
     // constructor when relocating their elements.
     // --------------------------------------------------------
@@ -61,10 +61,19 @@ class Resource {
     //
     // b = a;
     // --------------------------------------------------------
+    // NOTE: Resource & -> lvalue (left value, doesn't mean it's always on the
+    // left, identity that we can come back to) - aka persistant object
+    // b = Resource{"A", 10}
+    // So:
+    // Resource& : returning the Resource being edited
+    // operator= : defining behavior of `=`
+    // Resource& other: accept an lvalue (persitant object) as const so it can't
+    //                  be editied
     Resource &operator=(const Resource &other) {
         std::cout << "copy assignment: " << other.name_ << " -> " << name_
                   << '\n';
 
+        // NOTE: `this` is a pointer to Resource
         if (this == &other) {
             return *this; // Protect against: a = a;
         }
@@ -84,6 +93,12 @@ class Resource {
     //
     // b = std::move(a);
     // --------------------------------------------------------
+    // NOTE: Resource && -> rvalue (right value, a temporary value)
+    // Resource{"B", 20} -> no variable assigned
+    // So:
+    // Resource& : returning the Resource being edited
+    // operator= : defining behavior of `=`
+    // Resource&& other: accept an rvalue, and we can edit that rvalue
     Resource &operator=(Resource &&other) noexcept {
         std::cout << "move assignment: " << other.name_ << " -> " << name_
                   << '\n';

@@ -85,7 +85,11 @@ template <typename T> struct Sender {
     // Moving transfers this sender without creating a new sender.
     Sender(Sender &&other) noexcept : state_{std::move(other.state_)} {}
 
-    // Copy-and-swap handles both copy assignment and move assignment.
+    // NOTE: Copy-and-swap handles both copy assignment and move assignment.
+    // Why?
+    // Since we passing (Sender other)
+    // - if `other` is an lvalue -> C++ will create a copy to pass it here
+    // - if `other` is an rvalue -> C++ will std::move it here
     Sender &operator=(Sender other) noexcept {
         state_.swap(other.state_);
         return *this;
@@ -181,6 +185,7 @@ template <typename T> struct Receiver {
             return std::nullopt;
         }
 
+        // get the message from the queue and pop it out
         T value{std::move(state_->messages.front())};
         state_->messages.pop();
 
