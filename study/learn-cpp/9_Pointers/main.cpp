@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <span>
 
 int main() {
     int value{42};
@@ -63,4 +64,17 @@ int main() {
     std::println("p4 value = {}", *p4);
     std::println("p4_plus = {} ", static_cast<void *>(p4_plus));
     std::println("p4_plus value = {}", *p4_plus);
+
+    // == Byte and string playground ==//
+    std::string hello{"Hello"};
+    std::span<const std::byte> bytes;
+    bytes = std::as_bytes(std::span{hello.data(), hello.size()});
+
+    for (std::byte b : bytes) {
+        if (b == static_cast<std::byte>('\0')) {
+            std::println("YOOO");
+            break;
+        }
+        std::cout << std::hex << static_cast<int>(b) << ' ' << std::endl;
+    }
 }
