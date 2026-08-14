@@ -4,47 +4,66 @@
 #include <mutex>
 #include <queue>
 #include <tuple>
+#include <utility>
 
 template <typename T> struct ChannelState {
-    std::shared_ptr<std::queue<T>> messages_;
-    std::mutex mutex_;
-    std::condition_variable condition_;
-    int sender_count_;
+    // NOTE: using `{}` to initialize default values
+    // so that make_shared can create new object with default values
+    std::queue<T> messages{};
+    std::mutex mutex{};
+    std::condition_variable condition{};
+    int sender_count{0};
 };
 
 template <typename T> struct Sender {
-    // move the state in not copy
+    // NOTE: the param is copied in, but then we move it -> new object
     Sender(std::shared_ptr<ChannelState<T>> state) : state_(std::move(state)) {
         {
-            std::lock_guard lock{state_->mutex_};
-            state_->sender_count_++; // increase when a sender created
+            std::lock_guard lock{state_->mutex};
+            state_->sender_count++; // increase when a sender created
         }
     }
 
     // Copy constructer
     Sender(const Sender &other) = delete;
+    // Copy opertor
+    Sender &operator=(const Sender &other) = delete;
 
     // Move constructor
     Sender(Sender &&other) noexcept : state_{std::move(other.state_)} {}
-
-    // Copy opertor
-    Sender &operator=(const Sender &other) = delete;
     // Move opertor
     Sender &operator=(Sender &&other) = delete;
 
     ~Sender() {
-        {
-            std::lock_guard lock{state_->mutex_};
-            state_->sender_count_--; // decrease when a sender destroyed
 
-            if (state_->sender_count_ == 0) {
+        // return if the state_ already destroyed
+        if (!state_) {
+            return;
+        }
+
+        {
+            std::lock_guard lock{state_->mutex};
+            state_->sender_count--; // decrease when a sender destroyed
+
+            // Noti that sender_count is 0
+            if (state_->sender_count == 0) {
                 // notify all receivers
-                state_->condition_.notify_all();
+                state_->condition.notify_all();
             }
         }
     }
 
-    [[nodiscard]] Sender clone() {}
+    // clone() is like a copy constructor
+    [[nodiscard]] Sender clone() {
+        // NOTE:
+        // state_ copied in as param, but then move to new_sender
+        // and the increment count already increased by the constructor
+        Sender new_sender = Sender{state_};
+        return new_sender;
+    }
+
+    // TODO:
+    void send() {}
 
   private:
     std::shared_ptr<ChannelState<T>> state_;
@@ -57,45 +76,52 @@ template <typename T> struct Receiver {
 
     // Copy constructor
     Receiver(const Receiver &other) = delete;
-    // Move constructor
-    Receiver(Receiver &&other) = delete;
     // Copy opertor
     Receiver &operator=(const Receiver &other) = delete;
+
+    // Move constructor
+    Receiver(Receiver &&other) noexcept : state_{std::move(other.state_)} {}
     // Move opertor
     Receiver &operator=(Receiver &&other) = delete;
 
     ~Receiver() {}
+
+    // TODO:
+    [[nodiscard]] T recv() {}
 
   private:
     std::shared_ptr<ChannelState<T>> state_;
 };
 
 template <typename T> std::pair<Sender<T>, Receiver<T>> make_channel() {
+
+    // NOTE:
+    // make_shared with no argument here will rely on the constructor of the
+    // ChannelState to create a new object
     std::shared_ptr<ChannelState<T>> state =
-        std::make_shared<ChannelState<T>>(ChannelState<T>{
-            .messages_ = std::make_shared<std::queue<T>>(),
-            .sender_count_ = 0,
-        });
+        std::make_shared<ChannelState<T>>();
+
     Sender<T> sender = Sender{state};
     Receiver<T> receiver = Receiver{std::move(state)};
 
-    return std::pair{sender, receiver};
+    return std::pair<Sender<T>, Receiver<T>>{std::move(sender),
+                                             std::move(receiver)};
 }
 
 int main() {
     auto [sender, receiver] = make_channel<int>();
-    sender.state_->messages_->push(1);
-    sender.state_->messages_->push(2);
-    sender.state_->messages_->push(3);
-    sender.state_->messages_->push(4);
-    sender.state_->messages_->push(5);
+    sender.state_->messages->push(1);
+    sender.state_->messages->push(2);
+    sender.state_->messages->push(3);
+    sender.state_->messages->push(4);
+    sender.state_->messages->push(5);
 
     while (true) {
-        if (receiver.state_->sender_count_ == 0) {
+        if (receiver.state_->sender_count == 0) {
             break;
         }
-        auto message = receiver.state_->messages_->front();
-        receiver.state_->messages_->pop();
+        auto message = receiver.state_->messages->front();
+        receiver.state_->messages->pop();
         std::cout << message << std::endl;
     }
 }
