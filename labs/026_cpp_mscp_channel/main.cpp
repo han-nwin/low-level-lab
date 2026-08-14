@@ -1,3 +1,4 @@
+#include <condition_variable>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -7,18 +8,45 @@
 template <typename T> struct ChannelState {
     std::shared_ptr<std::queue<T>> messages_;
     std::mutex mutex_;
+    std::condition_variable condition_;
     int sender_count_;
 };
 
 template <typename T> struct Sender {
     // move the state in not copy
     Sender(std::shared_ptr<ChannelState<T>> state) : state_(std::move(state)) {
-        state_->sender_count_++; // increase when a sender created
+        {
+            std::lock_guard lock{state_->mutex_};
+            state_->sender_count_++; // increase when a sender created
+        }
     }
 
-    ~Sender() {}
+    // Copy constructer
+    Sender(const Sender &other) = delete;
 
-    // private:
+    // Move constructor
+    Sender(Sender &&other) noexcept : state_{std::move(other.state_)} {}
+
+    // Copy opertor
+    Sender &operator=(const Sender &other) = delete;
+    // Move opertor
+    Sender &operator=(Sender &&other) = delete;
+
+    ~Sender() {
+        {
+            std::lock_guard lock{state_->mutex_};
+            state_->sender_count_--; // decrease when a sender destroyed
+
+            if (state_->sender_count_ == 0) {
+                // notify all receivers
+                state_->condition_.notify_all();
+            }
+        }
+    }
+
+    [[nodiscard]] Sender clone() {}
+
+  private:
     std::shared_ptr<ChannelState<T>> state_;
 };
 
@@ -27,9 +55,18 @@ template <typename T> struct Receiver {
     Receiver(std::shared_ptr<ChannelState<T>> state)
         : state_(std::move(state)) {}
 
+    // Copy constructor
+    Receiver(const Receiver &other) = delete;
+    // Move constructor
+    Receiver(Receiver &&other) = delete;
+    // Copy opertor
+    Receiver &operator=(const Receiver &other) = delete;
+    // Move opertor
+    Receiver &operator=(Receiver &&other) = delete;
+
     ~Receiver() {}
 
-    // private:
+  private:
     std::shared_ptr<ChannelState<T>> state_;
 };
 
