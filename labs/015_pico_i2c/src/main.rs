@@ -154,9 +154,11 @@ fn main() -> ! {
             let new_ctr = (ctr & !(0b1_1111)) | 0x03;
             core::ptr::write_volatile(gp, new_ctr);
         }
+        //
+        // NOTE:
         // PAD bank
         // I2C lines are bidirectional and open-drain.
-        // The peripheral pulls them low for 0 and releases them for 1/input.
+        // The peripheral pulls them low for 0 and releases them for 1 per input.
         // IE stays enabled so SDA can receive data/ACK and SCL can detect
         // clock stretching. External resistors pull released lines high.
         let pad_set = [GPIO10_PAD, GPIO11_PAD];
