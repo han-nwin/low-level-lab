@@ -1,76 +1,87 @@
-# Raw UART: Pico 2 → STM32 Nucleo
+# Raw UART Loopback on Pico 2
 
-Goal
+## Goal
 
-Implement UART communication between:
+Implement UART communication between the two hardware UART peripherals on one
+Pico 2 (RP2350), using raw memory-mapped I/O.
 
-Pico 2 (RP2350)  ──UART──>  STM32 Nucleo
-      TX                        RX
-      GND ──────────────────── GND
+```text
+UART1 TX (GPIO4) ──jumper──> UART0 RX (GPIO1)
+```
 
-Do the Pico side using raw memory-mapped I/O.
-
+UART1 sends a message, UART0 receives it, and the Pico prints the received data
+to the Mac through the existing USB logger.
 
 ## Requirements
 
-Pico 2
+Configure everything manually through registers:
 
-Configure manually through registers:
+- Release UART0 and UART1 from reset.
+- Configure GPIO4 as UART1 TX (`FUNCSEL = 2`).
+  - Connect the pad and allow output.
+  - Disable the input path and internal pulls.
+- Configure GPIO1 as UART0 RX (`FUNCSEL = 2`).
+  - Connect the pad and enable input.
+  - Disable output and the pull-down.
+  - An RX pull-up is optional because UART idles high.
+- Configure both UARTs for:
+  - 115200 baud
+  - 8 data bits
+  - No parity
+  - 1 stop bit (8N1)
+- Enable UART1 TX and UART0 RX.
 
-* Release required peripherals from reset
-* Configure the TX GPIO
-    * Set GPIO FUNCSEL to UART
-    * Configure the pad as needed
-* Configure UART
-    * Set baud rate to 115200
-    * 8 data bits
-    * No parity
-    * 1 stop bit (8N1)
-    * Enable UART TX
-* Implement:
+Implement:
 
+```rust
 unsafe fn uart_init();
 unsafe fn uart_write_byte(byte: u8);
 unsafe fn uart_write_str(s: &str);
+unsafe fn uart_read_byte() -> u8;
+```
 
-* Send:
+Send through UART1:
 
-hello from pico
+```text
+hello from uart1
+```
 
-once per second.
+Receive the message through UART0 and print it through the USB logger once per
+second.
 
-STM32 Nucleo
+## Wiring
 
-Using its normal HAL is fine.
+With the Pico powered off, connect one jumper:
 
-* Configure one UART RX pin
-* Use 115200 8N1
-* Receive bytes from the Pico
-* Print received data to the PC through the Nucleo’s debug/serial connection
+```text
+GPIO4 (UART1 TX) ─────────> GPIO1 (UART0 RX)
+```
 
-Wiring
+No separate ground jumper is required because both UARTs are on the same board.
+Do not configure GPIO1 as an output.
 
-Pico TX  ─────────> Nucleo RX
-Pico GND ───────── Nucleo GND
+## Success
 
-Do not connect TX → TX.
+The Mac terminal repeatedly shows data that was transmitted by UART1 and
+received by UART0:
 
-Success
+```text
+hello from uart1
+hello from uart1
+hello from uart1
+```
 
-PC terminal repeatedly shows:
+## Stretch Goal
 
-hello from pico
-hello from pico
-hello from pico
+Make the loopback bidirectional with a second jumper:
 
-Stretch Goal
+```text
+GPIO4 (UART1 TX) ─────────> GPIO1 (UART0 RX)
+GPIO0 (UART0 TX) ─────────> GPIO5 (UART1 RX)
+```
 
-Make it bidirectional:
+Have UART0 reply to UART1 with:
 
-Pico TX ─────> Nucleo RX
-Pico RX <───── Nucleo TX
-GND     ────── GND
-
-Have the Nucleo reply:
-
+```text
 ACK
+```
