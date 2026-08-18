@@ -43,10 +43,12 @@ augroup markdown_notes
     autocmd FileType markdown setlocal wrap
     autocmd FileType markdown setlocal linebreak
     autocmd FileType markdown setlocal tabstop=2
-    autocmd FileType markdown setlocal shiftwidth=2
     autocmd FileType markdown setlocal softtabstop=2
+    autocmd FileType markdown setlocal shiftwidth=2
+    autocmd FileType markdown setlocal expandtab
     autocmd FileType markdown setlocal conceallevel=0
     autocmd FileType markdown setlocal spell spelllang=en_us
+    autocmd FileType markdown syntax clear
 augroup END
 
 autocmd FileType c,cpp,rust setlocal tabstop=4 shiftwidth=4 softtabstop=4 expandtab
