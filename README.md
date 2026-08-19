@@ -151,3 +151,10 @@ not merely read about it.
 - [ ] Bounded concurrent pipeline implemented in both Rust and C++
 - [ ] Nonblocking network service with profiling and graceful shutdown
 - [ ] Small OS or kernel component that applies memory, concurrency, and hardware concepts
+
+
+git_branch() {
+    git branch --show-current 2>/dev/null
+}
+
+PS1='\[\e[1;36m\]\u\[\e[0m\] \[\e[1;34m\]\w\[\e[0m\] \[\e[1;33m\]$(git_branch)\[\e[0m\]\n❯ '
