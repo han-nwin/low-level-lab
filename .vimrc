@@ -52,3 +52,24 @@ augroup markdown_notes
 augroup END
 
 autocmd FileType c,cpp,rust setlocal tabstop=4 shiftwidth=4 softtabstop=4 expandtab
+
+set background=dark
+colorscheme elflord
+
+highlight Normal     ctermfg=252 ctermbg=NONE
+highlight Comment    ctermfg=103
+highlight String     ctermfg=218
+highlight Constant   ctermfg=216
+highlight Number     ctermfg=216
+highlight Identifier ctermfg=117
+highlight Function   ctermfg=153
+highlight Statement  ctermfg=183
+highlight Type       ctermfg=159
+highlight PreProc    ctermfg=225
+highlight Special    ctermfg=222
+
+highlight LineNr     ctermfg=60 ctermbg=NONE
+highlight CursorLineNr ctermfg=225 ctermbg=NONE
+
+highlight NonText    ctermbg=NONE
+highlight EndOfBuffer ctermbg=NONE
