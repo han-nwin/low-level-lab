@@ -151,3 +151,5 @@ not merely read about it.
 - [ ] Bounded concurrent pipeline implemented in both Rust and C++
 - [ ] Nonblocking network service with profiling and graceful shutdown
 - [ ] Small OS or kernel component that applies memory, concurrency, and hardware concepts
+
+https://hantnguyen.notion.site/RTX-3c0e7e5d652b80aab238e67fefd0dac8
