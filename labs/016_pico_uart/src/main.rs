@@ -26,8 +26,8 @@ static METADATA: [u32; 1] = [u32::from_le_bytes(*b"Han!")];
 const RESETS_BASE: u32 = 0x4002_0000_u32;
 const RESETS_RESET: *mut u32 = (RESETS_BASE) as *mut u32;
 const RESETS_RESET_DONE: *const u32 = (RESETS_BASE + 0x08) as *const u32; // readonly
-const UART0_RESET_MASK: u32 = (1 << 27) as u32; // GP0 and GP1
-const UART1_RESET_MASK: u32 = (1 << 27) as u32; // GP4 and GP5
+const UART0_RESET_MASK: u32 = (1 << 26) as u32; // GP0 and GP1
+const UART1_RESET_MASK: u32 = (1 << 26) as u32; // GP4 and GP5
 
 // 2. Configure GPIO
 const IO_BANK0_BASE: u32 = 0x4002_8000_u32;
@@ -82,6 +82,7 @@ const UART1_CR: *mut u32 = (UART1_BASE + 0x0030) as *mut u32; // control
 
 #[entry]
 fn main() -> ! {
+    logging::init(); // logging and configure clock sys to 150MHZ
     unsafe {
         // 1. Reset UART0 and UART1
         // Reset
@@ -203,16 +204,64 @@ fn main() -> ! {
 
         // 3.4 UART_LCR_H, line control
         // 8N1: 8 data bits, no parity, 1 stop bit
-        // 0x83: DLAB = 1, 8 data bits, no parity, 1 stop bit
         // bit 7 = 0: no parity
         // bit 5:6 = 11 = 8bits data
-        //
-        core::ptr::write_volatile(UART0_LCR_H, 0);
-        core::ptr::write_volatile(UART1_LCR_H, 0);
+        // bit 4 = 1 = enable fifo
+        // bit 3 = 0 = no 2 stop bits
+        // bit 2 = 0 = no parity bit
+        // bit 1 = 0 = parity disable
+        // bit 0 = 0 = no send break
+        // -> value 0b01110000 = 0x70
+        core::ptr::write_volatile(UART0_LCR_H, 0x70);
+        core::ptr::write_volatile(UART1_LCR_H, 0x70);
+
+        // 3.5 Enable UART: RX and TX
+        // 0b0011_0000_0001
+        // bit 0 = 1: enable UART
+        // bit 8 = 1: enable TX
+        // bit 9 = 1: enable RX
+        core::ptr::write_volatile(UART0_CR, 0x301);
+        core::ptr::write_volatile(UART1_CR, 0x301);
     }
 
     loop {
         logging::poll();
         cortex_m::asm::delay(100_000); // poll every 100k cycles
+
+        // Write from UART0 to UART1
+        let message = b"Message from UART0 to UART1\r\n";
+        for &byte in message {
+            unsafe {
+                uart_write_byte(UART1_DR, UART1_FR, byte);
+                let read_byte = uart_read_byte(UART0_DR, UART0_FR);
+                logln!("Read byte from UART0: {}", read_byte as char);
+            }
+        }
+    }
+}
+
+unsafe fn uart_write_byte(uart_dr: *mut u32, uart_fr: *const u32, byte: u8) {
+    unsafe {
+        // bit 5 TXFF = 1 mean transmit FIFO is full
+        // wait till it's empty aka = 0
+        while core::ptr::read_volatile(uart_fr) & (1 << 5) != 0 {
+            core::hint::spin_loop();
+        }
+
+        //then write the byte
+        core::ptr::write_volatile(uart_dr, byte as u32);
+    }
+}
+
+unsafe fn uart_read_byte(uart_dr: *mut u32, uart_fr: *const u32) -> u8 {
+    unsafe {
+        // bit 5 RXFF = 1 mean receive FIFO is empty
+        // wait till it's full aka = 0
+        while core::ptr::read_volatile(uart_fr) & (1 << 4) != 0 {
+            core::hint::spin_loop();
+        }
+
+        // DATA is bit 7:0 aka 0b1111_1111 = 0xff
+        (core::ptr::read_volatile(uart_dr) & 0xff) as u8
     }
 }
