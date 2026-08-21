@@ -1,9 +1,24 @@
 syntax = "proto3";
 
 message Detection {
-  uint32 id = 1;
-  float range = 2;
-  float velocity = 3;
+    uint32 id       = 1;
+    float  range    = 2;
+    float  velocity = 3;
+}
+
+message DetectionReply {
+    bool accepted = 1;
 }
 
 
+// NEW PART:
+//
+// protobuf defines the DATA above.
+//
+// gRPC uses this service definition to define the RPC.
+
+service RadarService {
+
+    rpc SendDetection(Detection)
+        returns (DetectionReply);
+}
