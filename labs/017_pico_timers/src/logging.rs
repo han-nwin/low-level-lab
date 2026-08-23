@@ -4,6 +4,8 @@
 //! (at least every few milliseconds). Use `log!` and `logln!` like `print!`
 //! and `println!`.
 
+// NOTE: screen /dev/cu.usbmodemA74D15D81
+
 use rp_usb_serial::RpUsbConsole;
 use rp235x_hal as hal;
 
@@ -18,6 +20,10 @@ pub fn init() {
     let mut watchdog = hal::Watchdog::new(peripherals.WATCHDOG);
 
     // Configure the chip clock
+    // NOTE: `init_clocks_and_plls()` uses the watchdog HAL to configure all tick generators.
+    // With the 12 MHz crystal, it sets TIMER0_CYCLES to 12
+    // and enables the TIMER0 tick generator, producing one tick per microsecond.
+    // TIMER0_CYCLES: the numbers of cycles for 1 timer tick
     let clocks = hal::clocks::init_clocks_and_plls(
         XTAL_FREQ_HZ,
         peripherals.XOSC,
