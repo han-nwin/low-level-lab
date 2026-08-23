@@ -1,120 +1,124 @@
-# Lab 018: Busy-Wait Delay vs Timer Interrupt
+# Lab 018: A Reminder Alarm
 
 ## Goal
 
-Start with the blocking timer delay from lab 017:
+Build two hardcoded five-second reminder alarms:
 
-```rust
-fn delay_microsec(micro_sec: u64) {
-    let start = timer_ticks();
-    let delay_tick = 2 * micro_sec; // 2 ticks per microsecond
-    while timer_ticks().wrapping_sub(delay_tick) < start {
-        logging::poll(); // keep USB alive
-        core::hint::spin_loop();
-    }
-}
-```
+- **Polling alarm:** `main` waits inside the delay, so its LCD animation freezes.
+- **Interrupt alarm:** `main` starts the alarm and continues updating the LCD.
 
-Then create a second delay mechanism using a TIMER0 alarm and an interrupt.
-Compare the two designs and prove whether foreground code can do useful work
-while each delay is active.
+When either alarm expires, the LCD displays `TIME UP`.
 
-```text
-busy-wait delay                     interrupt delay
-
-call delay_microsec()               arm timer alarm
-        |                                  |
-        v                                  v
-main stays inside loop              function returns to main
-        |                                  |
-        v                                  v
-foreground work stops               foreground work continues
-        |                                  |
-        v                                  v
-deadline reached                    alarm interrupt fires
-        |                                  |
-        v                                  v
-function returns                    handler marks delay complete
-```
-
-The goal is not merely to make an interrupt fire. The goal is to understand
-the difference between a blocking delay and a non-blocking, interrupt-driven
-deadline.
+The LCD animation represents normal application work. It makes the difference
+between blocking and non-blocking code easy to see.
 
 ## Starting point
 
-This directory carries the working setup from `../017_pico_timers`:
+The starter code already has:
 
-- `memory.x`
-- `.cargo/config.toml`
-- `.vscode/settings.json`
-- `Cargo.toml`
-- `src/logging.rs`
-- `src/main.rs`
+- `delay_microsec_polling()` from lab 017;
+- USB logging;
+- the LCD driver from lab 015;
+- TIMER0 configured for **two ticks per microsecond**.
 
-Keep the working timer setup and `timer_ticks()` implementation. The copied
-program deliberately still contains the old busy-wait delay so it can serve as
-the baseline measurement.
+Use a fixed duration in both examples:
 
-For a fair first comparison, keep the current configuration of two timer ticks
-per microsecond in both tests. If you later restore the normal one-tick-per-
-microsecond configuration, update both delay calculations together.
-
-## Important API difference
-
-A function that arms an interrupt and then loops until the handler sets a flag
-is still a blocking function. It changes how completion is detected, but it
-does not free `main` to do other work.
-
-Design the interrupt version as a non-blocking operation with two concepts:
-
-```text
-start an interrupt delay -> returns immediately
-check/receive completion -> tells main when the handler has fired
+```rust
+const ALARM_US: u64 = 5_000_000;
 ```
 
-Choose your own function names and shared-state design. Do not force the new
-mechanism into the same blocking shape as `delay_microsec()`.
+## LCD activity
 
-## The comparison experiment
+Have `main` animate one LCD character using these frames:
 
-Run two tests with the same delay, for example three seconds.
+```rust
+let frames = [b'|', b'/', b'-', b'\\'];
+```
 
-### Test A: busy-wait delay
+For example:
 
-1. Show `BUSY WAIT` on the LCD.
-2. Reset a foreground work counter to zero.
-3. Call `delay_microsec(3_000_000)`.
-4. Try to update the foreground counter and LCD from `main`.
-5. When the delay returns, log the elapsed time and final work count.
+```text
+POLL ALARM 5s
+Main active  |
+```
 
-Expected observation: the LCD display freezes during the delay because `main`
-cannot reach the foreground work. USB polling still occurs only because it was
-manually placed inside `delay_microsec()`.
+The last character changes while `main` is available to update it.
 
-### Test B: interrupt delay
+## Example 1: Polling alarm
 
-1. Show `IRQ WAIT` on the LCD.
-2. Reset the same foreground work counter to zero.
-3. Arm a TIMER0 alarm for the same three-second duration.
-4. Return immediately to the main loop.
-5. Increment the work counter and periodically update it on the LCD.
-6. Stop the test when the interrupt handler reports completion.
-7. Log the elapsed time and final work count.
+1. Display `POLL ALARM 5s` and the first animation frame.
+2. Call `delay_microsec_polling(ALARM_US)`.
+3. Display `TIME UP` after the function returns.
 
-Expected observation: the LCD counter continues changing during the delay.
-The final count should be much larger than the busy-wait result because the
-foreground remained available.
+During the five-second delay, the animation is frozen because `main` is stuck
+inside `delay_microsec_polling()`.
 
-The work counter is the measurement; the LCD makes the result visible. Do not
-compare raw loop counts as a CPU benchmark—the I²C writes and USB polling also
-consume time. The important result is stopped versus continuing foreground
-progress.
+```text
+show POLL ALARM 5s
+         |
+         v
+main enters polling delay ----> LCD freezes
+         |
+         v
+five seconds pass ----> show TIME UP
+```
 
-## LCD setup from lab 015
+Calling `logging::poll()` inside the delay keeps USB alive, but it does not let
+`main` run the LCD animation.
 
-Reuse the raw I²C1 and LCD code from `../015_pico_i2c` after you have the timer
-interrupt working by itself.
+## Example 2: Interrupt alarm
+
+Implement a non-blocking alarm using TIMER0 Alarm 0.
+
+1. Display `IRQ ALARM 5s`.
+2. Arm Alarm 0 for five seconds in the future.
+3. Return immediately to `main`.
+4. Keep cycling through the LCD animation frames.
+5. When the interrupt reports completion, display `TIME UP`.
+
+```text
+show IRQ ALARM 5s
+         |
+         v
+arm Alarm 0 and return ----> main keeps animating the LCD
+         |
+         v
+interrupt fires ----> handler sets flag ----> main shows TIME UP
+```
+
+The alarm-start function must only arm the alarm and return. If it loops until
+the interrupt sets a flag, it is still blocking.
+
+Only `main` updates the LCD. The interrupt handler should acknowledge the alarm
+and set a completion flag—nothing more.
+
+## Implementation checkpoints
+
+1. Make the hardcoded LCD animation run.
+2. Run the polling example and observe it freeze for five seconds.
+3. Configure TIMER0 Alarm 0 and make one interrupt fire.
+4. In the handler, acknowledge the alarm and set an `AtomicBool`.
+5. Make the interrupt alarm function return immediately after arming it.
+6. Animate the LCD in `main` until the completion flag is set.
+7. Display `TIME UP` from `main`.
+
+## Interrupt requirements
+
+- Use TIMER0 Alarm 0 through raw register access.
+- Enable Alarm 0 in both TIMER0 and the Cortex-M33 NVIC.
+- Acknowledge the timer interrupt in the handler.
+- Keep the handler short and bounded.
+- Share completion safely, for example with `AtomicBool`; do not use an
+  unsynchronized `static mut`.
+- Do not perform LCD, I²C, USB, or logging work in the handler.
+- Do not poll `timer_ticks()` in `main` to decide when the interrupt alarm has
+  expired.
+- Use the same five-second duration and tick rate in both examples.
+
+Read RP2350 datasheet sections 12.8.3 (Alarms), 12.8.4 (Interrupts), the timer
+register descriptions, and the interrupt table.
+
+## LCD wiring
 
 ```text
 Pico 2 W                 LCD module
@@ -125,78 +129,11 @@ GP10     <--- level shifter ---> SDA
 GP11     <--- level shifter ---> SCL
 ```
 
-Bring over only the pieces needed to initialize I²C1/LCD, position the cursor,
-and write a short counter. Do not access I²C or the LCD from the timer interrupt
-handler. The handler should only acknowledge the timer and publish minimal
-completion state; `main` owns the display.
-
-If the LCD is not connected, use the GP16 external LED from lab 012 as a
-fallback heartbeat. It should freeze during the busy wait and keep blinking
-during the interrupt-driven wait. Keep the USB work-count logs in either case.
-
-## Timer interrupt requirements
-
-- Use TIMER0 Alarm 0 through raw register access.
-- Enable Alarm 0 in the TIMER0 peripheral.
-- Enable the corresponding interrupt in the Cortex-M33 NVIC.
-- Write the interrupt handler yourself.
-- Clear/acknowledge the timer interrupt in the handler.
-- Keep the handler short and bounded.
-- Do not log, update the LCD, or perform I²C transfers inside the handler.
-- Share completion state safely; do not use an unsynchronized `static mut`.
-- Keep calling `logging::poll()` from foreground code.
-- Do not poll `timer_ticks()` in the interrupt-driven test to decide whether
-  the three-second deadline has arrived.
-
-## Read first
-
-In section 12.8 of the RP2350 datasheet, continue where lab 017 stopped:
-
-1. **12.8.3 — Alarms**
-2. **12.8.4 — Interrupts**
-3. The TIMER register list for `ALARM0`, `ARMED`, `INTR`, `INTE`, and `INTS`
-
-Also find the RP2350 interrupt table and confirm which NVIC interrupt belongs
-to TIMER0 Alarm 0. Review how `cortex-m-rt` declares device interrupt handlers
-and how the `cortex-m` crate controls NVIC interrupts.
-
-Get register offsets and bit meanings from the datasheet rather than from a
-finished implementation.
-
-## Suggested checkpoints
-
-1. Build and run the copied lab 017 program unchanged.
-2. Add the TIMER0 alarm and make one interrupt fire.
-3. Have the handler acknowledge the interrupt and publish completion state.
-4. Build the non-blocking start/completion interface.
-5. Compare busy-wait and interrupt delays using only a foreground work counter
-   and USB logs.
-6. Add the lab 015 LCD as the visual foreground workload.
-7. Confirm the LCD freezes in the busy test and continues in the IRQ test.
-
-## Questions to answer
-
-1. Why does the original `delay_microsec()` block application work even though
-   it calls `logging::poll()`?
-2. Why would waiting on an interrupt-completion flag inside the new function
-   still block the caller?
-3. Why are both the TIMER0 interrupt enable and the NVIC enable required?
-4. Why must the handler acknowledge the peripheral before returning?
-5. Why must I²C, LCD, and USB operations stay outside the handler?
-6. How is completion state safely shared between the handler and `main`?
-7. What happens to the alarm comparison when the low timer word wraps?
-8. If the core used `wfi` while waiting, would the application be non-blocking,
-   CPU-efficient, both, or neither?
-
 ## Done when
 
-- Both tests use the same requested delay and timer tick rate.
-- The busy-wait test visibly stops foreground progress.
-- The interrupt-driven test returns control to `main` while the deadline is
-  pending.
-- TIMER0 Alarm 0 invokes the handler without deadline polling in `main`.
-- The handler acknowledges the correct source and safely reports completion.
-- The LCD counter or LED heartbeat continues during the interrupt wait.
-- USB logs show elapsed time and foreground work counts for both tests.
-- You can explain why the interrupt version frees the foreground rather than
-  merely replacing one polling condition with another.
+- The polling alarm freezes the LCD animation until `TIME UP` appears.
+- The interrupt alarm lets the LCD animation continue until `TIME UP` appears.
+- Alarm 0 invokes the handler without deadline polling in `main`.
+- The handler acknowledges the alarm and safely reports completion.
+- You can explain why the interrupt version leaves `main` free to do other
+  work.

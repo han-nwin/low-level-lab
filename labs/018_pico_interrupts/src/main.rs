@@ -75,7 +75,6 @@ fn main() -> ! {
     // NOTE: logging:init set TIMER0_CYCLE = 12 -> 1 tick per micro sec
     // we'll reconfigure it below to a new value
     logging::init(); // logging and configure clock sys to 150MHZ
-    let lcd = Lcd::init();
 
     unsafe {
         // 1. Reset TIMER0
@@ -90,7 +89,7 @@ fn main() -> ! {
         while core::ptr::read_volatile(RESETS_RESET_DONE) & TIMER0_RESET_MASK != TIMER0_RESET_MASK {
             time_out -= 1;
             if time_out <= 0 {
-                panic!("UART1 reset timeout")
+                panic!("TIMER0 reset timeout")
             }
             core::hint::spin_loop();
         }
@@ -115,28 +114,16 @@ fn main() -> ! {
         // 3. Read the timer ticks
         timer_ticks();
 
+        let mut lcd = Lcd::init();
+        create_wave_glyphs(&mut lcd);
+        let mut animation_step = 0;
         loop {
             logging::poll();
-            let start = timer_ticks();
-            cortex_m::asm::delay(100_000); // poll every 100k iterations, around 3 cycles
-            let end = timer_ticks();
 
-            // NOTE: Since our clk_sys is 150MHZ
-            // asm::delay(100_000) performs about 100k loop iterations.
-            // On this Cortex-M33, each iteration takes about 3 CPU cycles.
-            // 100k * 3 = 300k CPU cycles
-            // 300k / 150MHz = 2,000 microseconds
-            // 2,000 us * 2 timer ticks/us = about 4,000 ticks
-            logln!("Elapsed time: {} micro sec", end - start);
+            animate_sine_wave(&mut lcd, animation_step);
+            animation_step = animation_step.wrapping_add(1);
 
-            logln!("Start test delay_microsec. Count 1 2 3, it should delay 3 sec...");
-            delay_microsec(1_000_000);
-            logln!("1");
-            delay_microsec(1_000_000);
-            logln!("2");
-            delay_microsec(1_000_000);
-            logln!("3");
-            logln!("DONE");
+            cortex_m::asm::delay(50000);
         }
     }
 }
@@ -159,5 +146,109 @@ fn delay_microsec_polling(micro_sec: u64) {
     while timer_ticks().wrapping_sub(delay_tick) < start {
         logging::poll(); // keep usb alive
         core::hint::spin_loop();
+    }
+}
+
+// TODO:
+fn delay_microsec_intterupt(micro_sec: u64) {}
+
+// Create eight custom LCD characters, each containing a five-pixel
+// horizontal line at a different height. The sine animation selects
+// one of these slots to draw each wave segment vertically.
+// After this call, the LCD's eight custom-character slots contain:
+//
+// slot 0:  #####   slot 4:  .....
+//          .....            .....
+//          .....            .....
+//          .....            .....
+//          .....            #####
+//          .....            .....
+//          .....            .....
+//          .....            .....
+//
+// slot 1:  .....   slot 5:  .....
+//          #####            .....
+//          .....            .....
+//          .....            .....
+//          .....            .....
+//          .....            #####
+//          .....            .....
+//          .....            .....
+//
+// slot 2:  .....   slot 6:  .....
+//          .....            .....
+//          #####            .....
+//          .....            .....
+//          .....            .....
+//          .....            .....
+//          .....            #####
+//          .....            .....
+//
+// slot 3:  .....   slot 7:  .....
+//          .....            .....
+//          .....            .....
+//          #####            .....
+//          .....            .....
+//          .....            .....
+//          .....            .....
+//          .....            #####
+//
+// Writing byte 0 through 7 to a display cell selects the corresponding
+// custom character from CGRAM.
+fn create_wave_glyphs(lcd: &mut Lcd) {
+    for height in 0..8 {
+        let mut pixels = [0u8; 8];
+
+        // One entire 5 pixels horizontal line
+        pixels[height] = 0b11111;
+
+        lcd.define_custom_char(height as u8, pixels);
+    }
+}
+
+// The LCD has 2 row, each row has 8 vertical pixels -> 16 different heights 0:15
+const SINE: [u8; 32] = [
+    8, 9, 10, 12, 13, 14, 14, 15, 15, 15, 14, 14, 13, 12, 10, 9, 8, 6, 5, 3, 2, 1, 1, 0, 0, 0, 1,
+    1, 2, 3, 5, 6,
+];
+const LCD_COLUMNS: [LcdCol; 16] = [
+    LcdCol::Col1,
+    LcdCol::Col2,
+    LcdCol::Col3,
+    LcdCol::Col4,
+    LcdCol::Col5,
+    LcdCol::Col6,
+    LcdCol::Col7,
+    LcdCol::Col8,
+    LcdCol::Col9,
+    LcdCol::Col10,
+    LcdCol::Col11,
+    LcdCol::Col12,
+    LcdCol::Col13,
+    LcdCol::Col14,
+    LcdCol::Col15,
+    LcdCol::Col16,
+];
+
+fn animate_sine_wave(lcd: &mut Lcd, frame: usize) {
+    for column_index in 0..16 {
+        let column = LCD_COLUMNS[column_index];
+
+        // Erase the previous pixels in this column.
+        lcd.write_byte_at(LcdRow::Row1, column, b' ');
+        lcd.write_byte_at(LcdRow::Row2, column, b' ');
+
+        // Multiplying the column by 2 fits one complete wave
+        // across the 16-character display.
+        let phase = (column_index * 2 + frame) % SINE.len();
+        let height = SINE[phase];
+
+        if height < 8 {
+            // Top half of the display.
+            lcd.write_byte_at(LcdRow::Row1, column, height);
+        } else {
+            // Bottom half of the display.
+            lcd.write_byte_at(LcdRow::Row2, column, height - 8);
+        }
     }
 }

@@ -70,14 +70,14 @@ const LCD_RW: u8 = 1 << 1;
 const LCD_BACKLIGHT: u8 = 1 << 3;
 
 #[repr(u8)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum LcdRow {
     Row1 = 0,
     Row2 = 1,
 }
 
 #[repr(u8)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum LcdCol {
     Col1 = 0,
     Col2 = 1,
@@ -246,9 +246,61 @@ impl Lcd {
         }
     }
 
+    // Write one character at the selected LCD position.
+    //
+    // `byte` is a character code, not the character's pixel data:
+    // - `b'A'` selects the LCD's built-in `A` glyph.
+    // - `0..=7` selects a previously defined custom-character slot.
+    // - `b'2'` displays the digit `2`, while `2` displays custom slot 2.
     pub fn write_byte_at(&mut self, row: LcdRow, column: LcdCol, byte: u8) {
         Self::set_cursor(row, column);
         Self::lcd_write_byte(byte, true); // true = write data
+    }
+
+    pub fn clear(&mut self) {
+        // write 0x01 instruction will clear it
+        Self::lcd_write_byte(0x01, false); // Clear display
+        cortex_m::asm::delay(300_000); // Clear requires about 2 ms
+    }
+    // Define one custom 5×8 LCD character.
+    //
+    // The LCD has eight custom-character slots (`0..=7`) in CGRAM
+    // (Character Generator RAM). Each slot contains eight bytes:
+    // one byte for each horizontal pixel row.
+    //
+    // Only the lowest five bits of each byte are displayed:
+    // 0b00000  ->  .....
+    // 0b01010  ->  .#.#.
+    // 0b11111  ->  #####
+    //
+    // CGRAM address. The following eight data writes store the
+    // character's eight pixel rows. CGRAM advances automatically
+    // after each write.
+    //
+    // Defining a slot replaces any character previously stored there.
+    // To display the finished character, write its slot number using
+    // `write_byte_at()`:
+    //
+    // define_custom_char(2, pixels)
+    // write_byte_at(row, column, 2)
+    //
+    // `write_byte_at()` also selects DDRAM again before displaying the
+    // character, because defining a character leaves the LCD pointing
+    // at CGRAM.
+    pub fn define_custom_char(&mut self, slot: u8, pixels: [u8; 8]) {
+        let slot = slot & 0b0000_0111; // we only have 8 custom-char slot
+
+        // Select the custom char memory location
+        //
+        // NOTE: Each character occupies eight CGRAM addresses, so itsstarting
+        // address is `slot * 8`, written here as `slot << 3`.
+        // `0x40 | (slot << 3)` is the LCD command that selects that
+        Self::lcd_write_byte(0b0100_0000 | (slot << 3), false);
+
+        // each byte describe one 5-pixels row
+        for pixel_row in pixels {
+            Self::lcd_write_byte(pixel_row & 0b0001_1111, true);
+        }
     }
 
     fn i2c_write(byte: u8) {
@@ -378,35 +430,33 @@ impl Lcd {
     //
     // is_data = false keeps RS low, telling the LCD that these values are commands.
     // Each nibble is accepted on the falling edge of EN.
-    unsafe fn startup_sequence() {
-        unsafe {
-            // NOTE:
-            //  This places 0011 on LCD pins D7–D4. It tells the LCD to use 8-bit mode. We
-            // send it three times so the LCD recognizes it regardless of its initial state.
-            // 0011 → wait at least 4.1 ms
-            // 0011 → wait at least 100 µs
-            // 0011 → LCD is now synchronized in 8-bit mode
-            // Required startup sequence. Initially the LCD expects 8-bit commands,
-            // so these are sent as individual upper nibbles.
-            Self::lcd_write_nibble(0x03, false);
-            cortex_m::asm::delay(750_000); // 5 ms (minimum is 4.1 ms)
+    fn startup_sequence() {
+        // NOTE:
+        //  This places 0011 on LCD pins D7–D4. It tells the LCD to use 8-bit mode. We
+        // send it three times so the LCD recognizes it regardless of its initial state.
+        // 0011 → wait at least 4.1 ms
+        // 0011 → wait at least 100 µs
+        // 0011 → LCD is now synchronized in 8-bit mode
+        // Required startup sequence. Initially the LCD expects 8-bit commands,
+        // so these are sent as individual upper nibbles.
+        Self::lcd_write_nibble(0x03, false);
+        cortex_m::asm::delay(750_000); // 5 ms (minimum is 4.1 ms)
 
-            Self::lcd_write_nibble(0x03, false);
-            cortex_m::asm::delay(675_000); // 4.5 ms, matching Freenove's driver
+        Self::lcd_write_nibble(0x03, false);
+        cortex_m::asm::delay(675_000); // 4.5 ms, matching Freenove's driver
 
-            Self::lcd_write_nibble(0x03, false);
-            cortex_m::asm::delay(22_500); // 150 µs
+        Self::lcd_write_nibble(0x03, false);
+        cortex_m::asm::delay(22_500); // 150 µs
 
-            Self::lcd_write_nibble(0x02, false); // Enter 4-bit mode
+        Self::lcd_write_nibble(0x02, false); // Enter 4-bit mode
 
-            // From here, commands are complete 8-bit values sent as two nibbles.
-            Self::lcd_write_byte(0x28, false); // 4-bit mode, two lines, 5×8 characters
-            Self::lcd_write_byte(0x08, false); // Display off
-            Self::lcd_write_byte(0x01, false); // Clear display
-            cortex_m::asm::delay(300_000); // Clear requires about 2 ms
-            Self::lcd_write_byte(0x06, false); // Move cursor right after each character
-            Self::lcd_write_byte(0x0c, false); // Display on, cursor off
-            // ============ END sequence =========//
-        }
+        // From here, commands are complete 8-bit values sent as two nibbles.
+        Self::lcd_write_byte(0x28, false); // 4-bit mode, two lines, 5×8 characters
+        Self::lcd_write_byte(0x08, false); // Display off
+        Self::lcd_write_byte(0x01, false); // Clear display
+        cortex_m::asm::delay(300_000); // Clear requires about 2 ms
+        Self::lcd_write_byte(0x06, false); // Move cursor right after each character
+        Self::lcd_write_byte(0x0c, false); // Display on, cursor off
+        // ============ END sequence =========//
     }
 }

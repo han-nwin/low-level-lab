@@ -87,7 +87,7 @@ fn main() -> ! {
         while core::ptr::read_volatile(RESETS_RESET_DONE) & TIMER0_RESET_MASK != TIMER0_RESET_MASK {
             time_out -= 1;
             if time_out <= 0 {
-                panic!("UART1 reset timeout")
+                panic!("TIMER0 reset timeout")
             }
             core::hint::spin_loop();
         }
