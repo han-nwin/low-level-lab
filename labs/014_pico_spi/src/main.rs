@@ -287,7 +287,7 @@ fn main() -> ! {
             // USB is a polled protocol. Calling this often lets the Mac
             // enumerate the device and drains queued log messages.
             logging::poll();
-            cortex_m::asm::delay(100_000); // poll every 100k cycles
+            cortex_m::asm::delay(100_000); // poll every 100k iterations, around 3 cycles
 
             log_countdown -= 1;
             if log_countdown == 0 {

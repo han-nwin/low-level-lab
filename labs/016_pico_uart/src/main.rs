@@ -226,7 +226,7 @@ fn main() -> ! {
 
     loop {
         logging::poll();
-        cortex_m::asm::delay(100_000); // poll every 100k cycles
+        cortex_m::asm::delay(100_000); // poll every 100k iterations, around 3 cycles
 
         // Write from UART0 to UART1
         let message = b"Message from UART0 to UART1\r\n";

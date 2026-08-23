@@ -115,12 +115,16 @@ fn main() -> ! {
         loop {
             logging::poll();
             let start = timer_ticks();
-            cortex_m::asm::delay(100_000); // poll every 100k cycles
+            cortex_m::asm::delay(100_000); // poll every 100k iterations, around 3 cycles
             let end = timer_ticks();
 
-            // NOTE: Since our clk_sys is 150MHZ -> 100k cycles = 667 micro sec
-            // our timer is 2 tick per micro sec -> we should see [end - start = 2*667 = 1334]
-            logln!("Elapsed time: {} micro sec", end - start);
+            // NOTE: Since our clk_sys is 150MHZ
+            // asm::delay(100_000) performs about 100k loop iterations.
+            // On this Cortex-M33, each iteration takes about 3 CPU cycles.
+            // 100k * 3 = 300k CPU cycles
+            // 300k / 150MHz = 2,000 microseconds
+            // 2,000 us * 2 timer ticks/us = about 4,000 ticks
+            logln!("Elapsed time: {} ticks", end - start); // should print 4000
 
             logln!("Start test delay_microsec. Count 1 2 3, it should delay 3 sec...");
             delay_microsec(1_000_000);
