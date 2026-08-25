@@ -4,9 +4,11 @@
 mod lcd;
 use lcd::{Lcd, LcdCol, LcdRow};
 mod logging;
+use core::sync::atomic::{AtomicBool, Ordering}; // use this to share state
 use cortex_m as _;
 use cortex_m_rt::entry;
 use panic_halt as _;
+use rp235x_hal::pac::{Interrupt, dma::TIMER0, interrupt};
 
 #[used]
 #[unsafe(link_section = ".start_block")]
@@ -70,6 +72,16 @@ const TIMER0_BASE: u32 = 0x400b_0000_u32;
 const TIMER0_TIME_HR: *mut u32 = (TIMER0_BASE + 0x08) as *mut u32; // readonly high bits
 const TIMER0_TIME_LR: *mut u32 = (TIMER0_BASE + 0x0c) as *mut u32; // readonly low bits
 
+// 4. ALARM for interrupt
+const TIMER0_ALARM0: *mut u32 = (TIMER0_BASE + 0x10) as *mut u32;
+const TIMER0_ARMED: *mut u32 = (TIMER0_BASE + 0x20) as *mut u32;
+const TIMER0_INTR: *mut u32 = (TIMER0_BASE + 0x3c) as *mut u32; // raw interrupt
+const TIMER0_INTE: *mut u32 = (TIMER0_BASE + 0x40) as *mut u32; // interrupt enable
+const ALARM0_MASK: u32 = 1 << 0; // bit 0 is for ALARM0
+const TICK_PER_MICROSEC: u64 = 2;
+static ALARM_DONE: AtomicBool = AtomicBool::new(false); // Share state between interrupt handler
+// and main
+
 #[entry]
 fn main() -> ! {
     // NOTE: logging:init set TIMER0_CYCLE = 12 -> 1 tick per micro sec
@@ -114,16 +126,29 @@ fn main() -> ! {
         // 3. Read the timer ticks
         timer_ticks();
 
+        // 4. Init the intterupt
+        init_alarm0_interrupt();
+
         let mut lcd = Lcd::init();
         create_wave_glyphs(&mut lcd);
         let mut animation_step = 0;
         loop {
             logging::poll();
 
-            animate_sine_wave(&mut lcd, animation_step);
-            animation_step = animation_step.wrapping_add(1);
+            // 1. Test with polling
+            // animate_sine_wave(&mut lcd, animation_step);
+            // animation_step = animation_step.wrapping_add(1);
+            // cortex_m::asm::delay(50_000);
+            // delay_microsec_polling(1_000_000);
 
-            cortex_m::asm::delay(50000);
+            // 2. Test with intterupt
+            // Arm the intterup then check for atomicbool state
+            delay_microsec_interrupt(1_000_000);
+            while !ALARM_DONE.load(Ordering::SeqCst) {
+                animate_sine_wave(&mut lcd, animation_step);
+                animation_step = animation_step.wrapping_add(1);
+                cortex_m::asm::delay(50_000);
+            }
         }
     }
 }
@@ -142,15 +167,77 @@ fn timer_ticks() -> u64 {
 
 fn delay_microsec_polling(micro_sec: u64) {
     let start = timer_ticks();
-    let delay_tick = 2 * micro_sec; // 2 tick per microsec
+    let delay_tick = TICK_PER_MICROSEC * micro_sec; // 2 tick per microsec
     while timer_ticks().wrapping_sub(delay_tick) < start {
         logging::poll(); // keep usb alive
         core::hint::spin_loop();
     }
 }
 
-// TODO:
-fn delay_microsec_intterupt(micro_sec: u64) {}
+// NOTE:
+// IRQ stands for Interrupt Request.
+// It is a signal asking the processor to pause its current work and run an
+// interrupt handler.
+// Timer reaches ALARM0
+//         ↓
+// TIMER0 raises an Interrupt Request (IRQ)
+//         ↓
+// NVIC receives the request
+//         ↓
+// CPU pauses main
+//         ↓
+// TIMER0_IRQ_0 handler runs
+//         ↓
+// CPU returns to main
+fn init_alarm0_interrupt() {
+    unsafe {
+        // Clear any old Alarm 0 interrupt
+        core::ptr::write_volatile(TIMER0_INTR, ALARM0_MASK);
+
+        // Allow Alarm 0 to produce a TIMER0 intterupt
+        let interrupt_enable = core::ptr::read_volatile(TIMER0_INTE);
+        core::ptr::write_volatile(TIMER0_INTE, interrupt_enable | ALARM0_MASK);
+
+        // Clear an old pending processor interrupt, then reenable it
+        cortex_m::peripheral::NVIC::unpend(Interrupt::TIMER0_IRQ_0);
+        cortex_m::peripheral::NVIC::unmask(Interrupt::TIMER0_IRQ_0);
+    }
+}
+
+// NOTE: Intterup handler for Timer0 Interrupt Request 0
+#[interrupt]
+fn TIMER0_IRQ_0() {
+    unsafe {
+        // INTR is write-one-to-clear
+        // basically tell TIMER0 "I'll handler this interrupt"
+        core::ptr::write_volatile(TIMER0_INTR, ALARM0_MASK);
+    }
+    // Then tell main the alarm has expired with the state
+    ALARM_DONE.store(true, Ordering::SeqCst);
+}
+
+// This fn is to arm the alarm
+fn delay_microsec_interrupt(micro_sec: u64) {
+    let delay_ticks = TICK_PER_MICROSEC * micro_sec;
+
+    assert!(
+        delay_ticks < u32::MAX as u64,
+        "Alarm 0 duration is to large (<u32)"
+    );
+
+    // Get TIMER0_TIME_LR value
+    // it's the low 32 bit, simply cast it to u32
+    let current_low = timer_ticks() as u32;
+    let deadline = current_low.wrapping_add(delay_ticks as u32);
+
+    unsafe {
+        // Remove any stale completion before arming
+        core::ptr::write_volatile(TIMER0_INTR, ALARM0_MASK);
+
+        // Writing deadline to ALARM0 will set the deadline and arm it
+        core::ptr::write_volatile(TIMER0_ALARM0, deadline);
+    }
+}
 
 // Create eight custom LCD characters, each containing a five-pixel
 // horizontal line at a different height. The sine animation selects
