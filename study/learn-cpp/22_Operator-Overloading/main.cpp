@@ -4,6 +4,7 @@ struct Vector2 {
     double x{};
     double y{};
 
+    // NOTE: += modifies the actual object
     Vector2 &operator+=(const Vector2 &other) {
         x += other.x;
         y += other.y;
@@ -12,10 +13,17 @@ struct Vector2 {
 };
 
 // Implement a binary operator using its compound-assignment counterpart.
+// NOTE:  + makes a copy, uses += on the copy, returns the copy
 Vector2 operator+(Vector2 left, const Vector2 &right) {
     left += right;
     return left;
 }
+// Vector2 a{1, 2};
+// Vector2 b{3, 4};
+// Vector2 c = a + b;
+// a == {1, 2}   // unchanged
+// b == {3, 4}   // unchanged
+// c == {4, 6}   // new result
 
 std::ostream &operator<<(std::ostream &output, const Vector2 &vector) {
     return output << '(' << vector.x << ", " << vector.y << ')';
