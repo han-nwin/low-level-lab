@@ -1,3 +1,19 @@
+// NOTE:
+// ---
+// SPI
+// SCLK / SCK  = clock
+// MOSI / TX   = controller -> peripheral
+// MISO / RX   = peripheral -> controller
+// CS / SS     = chip select
+// ---
+// Connect:
+// MCU SCLK -> device SCLK
+// MCU MOSI -> device MOSI
+// MCU MISO <- device MISO
+// MCU CS   -> device CS
+// ---
+// Think:
+// SPI = CLK + TX + RX + SELECT
 #![no_std]
 #![no_main]
 

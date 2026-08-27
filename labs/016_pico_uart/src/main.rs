@@ -1,3 +1,19 @@
+// NOTE:
+// UART
+// ----
+// TX = transmit
+// RX = receive
+// ----
+// Connect CROSSED:
+// MCU TX -> device RX
+// MCU RX <- device TX
+// ----
+// Think:
+// TX talks to RX
+// RX listens to TX
+// ----
+// Optional:
+// RTS / CTS = hardware flow control
 #![no_std]
 #![no_main]
 

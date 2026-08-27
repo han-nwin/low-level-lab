@@ -1,3 +1,18 @@
+// NOTE:
+// I2C
+// ---
+// SCL = clock
+// SDA = bidirectional data
+// ---
+// Connect:
+// SCL -> SCL
+// SDA -> SDA
+// ---
+// Think:
+// I2C = 2 shared wires
+// multiple devices distinguished by address
+// ---
+// Usually needs pull-up resistors on SDA/SCL.
 #![no_std]
 #![no_main]
 

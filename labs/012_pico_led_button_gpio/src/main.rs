@@ -1,3 +1,17 @@
+// NOTE:
+// GPIO
+// ----
+// IN  = MCU reads pin
+// OUT = MCU drives pin
+// ----
+// Common labels:
+// VCC / VDD = power
+// GND       = ground
+// EN        = enable
+// INT / IRQ = peripheral signals MCU
+// RST       = reset
+// PWM       = pulse-width-modulated output
+// ADC       = analog input
 #![no_std]
 #![no_main]
 
