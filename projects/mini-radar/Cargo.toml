@@ -9,19 +9,4 @@ cortex-m = "0.7"
 cortex-m-rt = "0.7"
 defmt = "1"
 defmt-rtt = "1"
-embedded-io = "0.7.1"
 panic-probe = { version = "1", features = ["print-defmt"] }
-rp235x-hal = { version = "0.4.0", features = [
-    "binary-info",
-    "critical-section-impl",
-    "rt",
-] }
-
-[profile.dev]
-debug = 2
-opt-level = 2
-
-[profile.release]
-debug = 2
-lto = "fat"
-opt-level = 2
