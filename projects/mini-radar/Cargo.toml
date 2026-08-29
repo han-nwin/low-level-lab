@@ -9,4 +9,7 @@ cortex-m = "0.7"
 cortex-m-rt = "0.7"
 defmt = "1"
 defmt-rtt = "1"
+embedded-hal = "1.0.0"
+panic-halt = "1.0.0"
 panic-probe = { version = "1", features = ["print-defmt"] }
+rp235x-hal = { version = "*", features = ["binary-info", "critical-section-impl", "rt", "defmt"] }
