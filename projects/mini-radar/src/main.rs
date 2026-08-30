@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+use cortex_m::prelude::_embedded_hal_serial_Read;
 // Ensure we halt the program on panic (if we don't mention this crate it won't
 // be linked)
 use panic_halt as _;
@@ -28,14 +29,103 @@ pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 /// Adjust if your board has a different frequency
 const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
-/// Entry point to our bare-metal application.
-///
+/// Entry point
 /// The `#[hal::entry]` macro ensures the Cortex-M start-up code calls this function
 /// as soon as all global variables and the spinlock are initialised.
-///
 /// The function configures the rp235x peripherals, then writes to the UART in
 /// an infinite loop.
 #[hal::entry]
 fn main() -> ! {
+    // Grab our singleton objects
+    let mut pac = hal::pac::Peripherals::take().unwrap();
+
+    // set up watchdog for clock
+    let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
+
+    // configure the clocks
+    let clocks = hal::clocks::init_clocks_and_plls(
+        XTAL_FREQ_HZ,
+        pac.XOSC,
+        pac.CLOCKS,
+        pac.PLL_SYS,
+        pac.PLL_USB,
+        &mut pac.RESETS,
+        &mut watchdog,
+    )
+    .unwrap();
+
+    // timer for delay
+    let mut delay = hal::Timer::new_timer0(pac.TIMER0, &mut pac.RESETS, &clocks);
+
+    // The single-cycle I/O block controls our GPIO pins
+    let mut sio = hal::Sio::new(pac.SIO);
+
+    // reset pins to default states
+    let pins = hal::gpio::Pins::new(
+        pac.IO_BANK0,
+        pac.PADS_BANK0,
+        sio.gpio_bank0,
+        &mut pac.RESETS,
+    );
+
+    // create a tuple of uart0 pins
+    // select funcsel and default pad with .into_function
+    let uart0_pins = (
+        pins.gpio0.into_function::<gpio::FunctionUart>(),
+        pins.gpio1.into_function::<gpio::FunctionUart>(),
+    );
+
+    // take ownership of UART0 peri and pins
+    // then resets and releases UART0 harware block
+    // the LD2450 module communicates with the outside world through a serial port
+    // with a default baud rate of 256000, 1 stop bit, and no parity bits
+    let mut uart0 = hal::uart::UartPeripheral::new(pac.UART0, uart0_pins, &mut pac.RESETS)
+        .enable(
+            UartConfig::new(256000.Hz(), DataBits::Eight, None, StopBits::One),
+            clocks.peripheral_clock.freq(),
+        )
+        .unwrap();
+
+    // Example data: 30 bytes.
+    // AA FF 03 00 0E 03 B1 86 10 00 40 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 55 CC
+    // |---header| |---- goal 1 info ----| |---- goal 2 info ----| |---- goal 3 info ----| |eof|
+    //
+    // Objective 1 x-coordinate: 0x0E + 0x03 * 256 = 782
+    // 0 - 782 = -782 mm
+    // Objective 1 y-coordinate: 0xB1 + 0x86 * 256 = 34481
+    // 34481 - 2^15 = 1713 mm
+    // Goal 1 speed：0x10 + 0x00 * 256 = 16
+    // 0 -16 =-16 cm/s
+    // Target 1 distance resolution: 0x40 +0x01* 256 = 320 mm
+    //                target (x, y)
+    //                     *
+    //                    /|
+    //                   / |
+    //            range /  | y (forward)
+    //                 /θ  |
+    //        Radar  *-----+
+    //                x (sideways)
+    // azimuth angle θ = atan2(x, y)
+
+    // NOTE: ========================
+    // DESIGN:
+    // LD2450
+    //    ↓
+    // UART hardware FIFO
+    //    ↓ read()
+    // 128-byte ring buffer
+    //    ↓ pop()
+    // header/frame parser
+    //    ↓
+    // 30-byte frame buffer
+    //    ↓
+    // validate and process
+    // Ring buffer isn't needed here but for learning producer/consumer design purpose
+    // ========================
+
+    // use this to read header and check end of frame (eof)
+    // LD2450 send 10 frames per second
+    uart0.read().unwrap();
+
     loop {}
 }

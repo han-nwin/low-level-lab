@@ -43,7 +43,7 @@ const RESETS_BASE: u32 = 0x4002_0000_u32;
 const RESETS_RESET: *mut u32 = (RESETS_BASE) as *mut u32;
 const RESETS_RESET_DONE: *const u32 = (RESETS_BASE + 0x08) as *const u32; // readonly
 const UART0_RESET_MASK: u32 = (1 << 26) as u32; // GP0 and GP1
-const UART1_RESET_MASK: u32 = (1 << 26) as u32; // GP4 and GP5
+const UART1_RESET_MASK: u32 = (1 << 27) as u32; // GP4 and GP5
 
 // 2. Configure GPIO
 const IO_BANK0_BASE: u32 = 0x4002_8000_u32;
