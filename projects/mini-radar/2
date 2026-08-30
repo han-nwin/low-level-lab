@@ -3,9 +3,7 @@
 
 mod logging;
 mod parser;
-mod processor;
 mod ring_buffer;
-
 use cortex_m::prelude::_embedded_hal_serial_Read;
 // Ensure we halt the program on panic (if we don't mention this crate it won't
 // be linked)
@@ -149,11 +147,10 @@ fn main() -> ! {
             // push to the parser
             // and wait till eof to get all data
             if parser.push(process_byte) == parser::ParserState::Eof {
+                // TODO: do processing here, just read data for now
                 while let Some(all_data) = parser.get_data() {
                     for data in all_data {
-                        logln!("process data: {:?}", data);
-                        let target_info = processor::process_data(&data);
-                        logln!("target info: {:?}", target_info);
+                        logln!("data: {:?}", data);
                     }
                 }
 
@@ -165,4 +162,63 @@ fn main() -> ! {
             read_flag = true;
         }
     }
+}
+
+// NOTE: Example data: 30 bytes.
+// AA FF 03 00 0E 03 B1 86 10 00 40 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 55 CC
+// |---header| |---- goal 1 info ----| |---- goal 2 info ----| |---- goal 3 info ----| |eof|
+//
+// Objective 1 x-coordinate: 0x0E + 0x03 * 256 = 782
+// 0 - 782 = -782 mm
+// Objective 1 y-coordinate: 0xB1 + 0x86 * 256 = 34481
+// 34481 - 2^15 = 1713 mm
+// Goal 1 speed：0x10 + 0x00 * 256 = 16
+// 0 -16 =-16 cm/s
+// Target 1 distance resolution: 0x40 +0x01* 256 = 320 mm
+//                    target (x, y)
+//                         *
+//                        /|
+//                       / |
+//      actual distance /  | y (forward)
+//                     /θ  |
+//            Radar  *-----+
+//                    x (sideways)
+//     azimuth angle θ = atan2(x, y)
+//
+//  Distance Resolution:
+//  Radar → | gate | gate | gate | gate | ...
+// approximately <distance_resolution> each
+#[derive(Debug)]
+struct TargetInfo {
+    x_coordinate: i16,
+    y_coordinate: i16,
+    speed: i16,
+    actual_distance: i16,
+    distance_resolution: i16,
+}
+
+fn process_data(data: &[u8]) -> TargetInfo {
+    let mut target_info = TargetInfo {
+        x_coordinate: 0,
+        y_coordinate: 0,
+        speed: 0,
+        actual_distance: 0,
+        distance_resolution: 0,
+    };
+
+    // the bytes is little endian
+    // data[0] = 0x0E
+    // data[1] = 0x03
+    // raw = 0x030E = 782
+    let raw = u16::from_le_bytes([data[0], data[1]]);
+
+    // The most significant bit of raw is sign bit
+    target_info.x_coordinate = if raw & 0x7FFF != 0 {
+        // positive
+        i32::from(raw);
+    } else {
+        -i32::from(raw);
+    }
+
+    target_info
 }
