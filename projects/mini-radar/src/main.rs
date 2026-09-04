@@ -11,14 +11,12 @@ use cortex_m::prelude::_embedded_hal_serial_Read;
 // be linked)
 use panic_halt as _;
 
-// Alias for our HAL crate
+// Alias for HAL crate
+use hal::gpio;
 use rp235x_hal as hal;
 
-use hal::gpio;
-
-// Some things we need
-use core::fmt::Write;
-use embedded_hal::delay::DelayNs;
+// use core::fmt::Write;
+// use embedded_hal::delay::DelayNs;
 use hal::clocks::Clock;
 use hal::fugit::RateExtU32;
 
