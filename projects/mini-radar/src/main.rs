@@ -2,9 +2,7 @@
 #![no_main]
 
 mod logging;
-mod parser;
-mod processor;
-mod ring_buffer;
+mod sensor;
 
 use cortex_m::prelude::_embedded_hal_serial_Read;
 // Ensure we halt the program on panic (if we don't mention this crate it won't
@@ -111,8 +109,8 @@ fn main() -> ! {
     // ========================
 
     // Create a ring buffer
-    let mut ring_buffer = ring_buffer::RingBuffer::<128>::init();
-    let mut parser = parser::Parser::init();
+    let mut ring_buffer = sensor::RingBuffer::<128>::init();
+    let mut parser = sensor::Parser::init();
     // init logging
     // it will move ownership of the clocks
     logging::init(pac.USB, pac.USB_DPRAM, &mut pac.RESETS, clocks.usb_clock);
@@ -146,11 +144,11 @@ fn main() -> ! {
         if let Some(process_byte) = ring_buffer.pop() {
             // push to the parser
             // and wait till eof to get all data
-            if parser.push(process_byte) == parser::ParserState::Eof {
+            if parser.push(process_byte) == sensor::ParserState::Eof {
                 while let Some(all_data) = parser.get_data() {
                     for data in all_data {
                         logln!("process data: {:?}", data);
-                        let target_info = processor::process_data(&data);
+                        let target_info = sensor::process_data(&data);
                         logln!("target info: {:?}", target_info);
                     }
                 }
