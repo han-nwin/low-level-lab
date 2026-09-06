@@ -88,77 +88,29 @@ fn main() -> ! {
         )
         .unwrap();
 
-    // Example data: 30 bytes.
-    // AA FF 03 00 0E 03 B1 86 10 00 40 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 55 CC
-    // |---header| |---- goal 1 info ----| |---- goal 2 info ----| |---- goal 3 info ----| |eof|
+    // Create new sensor instance and pass the uart0 ownership to it
+    let mut sensor = sensor::Ld2450::new(uart0);
 
-    // NOTE: ========================
-    // DESIGN:
-    // LD2450
-    //    ↓
-    // UART hardware FIFO
-    //    ↓ read()
-    // 128-byte ring buffer
-    //    ↓ pop()
-    // header/frame parser
-    //    ↓
-    // 30-byte frame buffer
-    //    ↓
-    // validate and process
-    // Ring buffer isn't needed here but for learning producer/consumer design purpose
-    // ========================
-
-    // Create a ring buffer
-    let mut ring_buffer = sensor::RingBuffer::<128>::init();
-    let mut parser = sensor::Parser::init();
-    // init logging
     // it will move ownership of the clocks
     logging::init(pac.USB, pac.USB_DPRAM, &mut pac.RESETS, clocks.usb_clock);
 
-    let mut read_flag = true;
     loop {
         logging::poll();
-        // use this to read header and check end of frame (eof)
-        // LD2450 send 10 frames per second
-        if read_flag {
-            match uart0.read() {
-                Ok(byte) => {
-                    // Push byte into ring.
-                    // if push fail -> ring buffer full, stop reading
-                    if !ring_buffer.push(byte) {
-                        read_flag = false;
-                    }
-                }
-                Err(nb::Error::WouldBlock) => {
-                    logln!("no byte yet");
-                }
-                Err(nb::Error::Other(error)) => {
-                    logln!("UART error: {:?}", error);
-                    ring_buffer.reset();
-                    parser.reset();
+        match sensor.poll() {
+            Ok(Some(sensor_info)) => {
+                for target_info in sensor_info.targets_info {
+                    logln!("target info: {:?}", target_info);
                 }
             }
-        }
-
-        // process the bytes in the ring_buffer
-        if let Some(process_byte) = ring_buffer.pop() {
-            // push to the parser
-            // and wait till eof to get all data
-            if parser.push(process_byte) == sensor::ParserState::Eof {
-                while let Some(all_data) = parser.get_data() {
-                    for data in all_data {
-                        logln!("process data: {:?}", data);
-                        let target_info = sensor::process_data(&data);
-                        logln!("target info: {:?}", target_info);
-                    }
-                }
-
-                // process this frame done, reset
-                parser.reset();
+            Ok(None) => {
+                logln!("continuing..");
             }
-
-            // after pop ringbuff should have some space
-            read_flag = true;
+            Err(sensor::SensorError::BufferFull) => {
+                logln!("buffer full. Resetting until next Header...");
+            }
+            Err(sensor::SensorError::Uart(error)) => {
+                logln!("UART error: {:?}", error);
+            }
         }
     }
 }

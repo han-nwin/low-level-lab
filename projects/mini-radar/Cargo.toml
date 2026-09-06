@@ -10,8 +10,11 @@ cortex-m-rt = "0.7"
 defmt = "1"
 defmt-rtt = "1"
 embedded-hal = "1.0.0"
+embedded-hal-nb = "1.0.0"
 panic-halt = "1.0.0"
 panic-probe = { version = "1", features = ["print-defmt"] }
 rp235x-hal = { version = "*", features = ["binary-info", "critical-section-impl", "rt", "defmt"] }
 rp-usb-serial = { version = "0.5", default-features = false, features = ["rp2350"] }
 nb = "1.1.0"
+mipidsi = "0.10.0"
+embedded-graphics = "0.8.2"
