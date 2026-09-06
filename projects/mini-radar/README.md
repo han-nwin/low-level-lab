@@ -1,3 +1,30 @@
+# Peripheral Docs
+
+### TFT 1.28inch 4-line-SPI IPS Module MSP1281 - GC9A01
+<https://www.lcdwiki.com/res/MSP1281/1.28inch_4-line-SPI_IPS_Module_MSP1281_User_Manual_EN.pdf>
+- LCD VCC → Pico 3V3
+- LCD GND → Pico GND
+- LCD SCL → GP2  (SPI0 SCK)
+- LCD SDA → GP3  (SPI0 MOSI/TX)
+- LCD DC  → GP4  (ordinary output)
+- LCD CS  → GP5  (ordinary output)
+- LCD RES → GP6  (ordinary output)
+
+### LD2450 sensor
+<https://www.tinytronics.nl/product_files/006000_HLK-LD2450-Instruction-Manual.pdf>
+- Sensor RX → Pico UART0 TX (GP0)
+- Sensor TX → Pico UART0 RX (GP1)
+- Sensor 5v → Pico 5V(VCC)
+- Sensor GND → Pico GND
+
+---
+```bash
+# logger
+screen /dev/cu.usbmodemA74D15D81
+
+```
+
+---
 # Packages
 
 ### cortex-m handles:
@@ -57,4 +84,12 @@
   - Text and fonts
   - Colors
   - Styles and strokes
-  - Iterators of pixels
+- Iterators of pixels
+
+### embedded-hal-bus handles:
+  - Converting an SPI bus and chip-select GPIO into an SPI device
+  - Managing the LCD chip-select signal for each SPI transaction
+
+### tinytga handles:
+  - Parsing TGA image data in `no_std` firmware
+  - Drawing compile-time embedded TGA assets through embedded-graphics

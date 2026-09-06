@@ -1,6 +1,11 @@
 // Entry point of ld2450 sensor logic
 
-use crate::sensor::*;
+use super::{
+    parser::{Parser, ParserState},
+    processor::{TargetInfo, process_data},
+    ring_buffer::RingBuffer,
+};
+
 use embedded_hal_nb::serial::{Read, Write};
 
 // Use <Uart> generic to avoid using

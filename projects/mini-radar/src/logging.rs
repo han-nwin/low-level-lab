@@ -3,6 +3,9 @@
 //! Call [`init`] once near the start of `main`, then call [`poll`] frequently
 //! (at least every few milliseconds). Use `log!` and `logln!` like `print!`
 //! and `println!`.
+//!
+
+//NOTE: screen /dev/cu.usbmodemA74D15D81
 
 use rp_usb_serial::RpUsbConsole;
 use rp235x_hal as hal;

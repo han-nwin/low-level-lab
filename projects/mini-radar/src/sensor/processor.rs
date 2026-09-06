@@ -24,11 +24,11 @@
 // approximately <distance_resolution> each
 #[derive(Debug)]
 pub struct TargetInfo {
-    x_coordinate: i16,
-    y_coordinate: i16,
-    speed: i16,
-    actual_distance: u32,
-    distance_resolution: u16,
+    pub x_coordinate: i16,
+    pub y_coordinate: i16,
+    pub speed: i16,
+    pub actual_distance: u32,
+    pub distance_resolution: u16,
 }
 
 pub fn process_data(data: &[u8]) -> TargetInfo {
@@ -83,10 +83,12 @@ pub fn process_data(data: &[u8]) -> TargetInfo {
     target_info.distance_resolution = u16::from_le_bytes([data[6], data[7]]);
     // == distance reso  ==//
 
-    // == actua distance == //
-    target_info.actual_distance =
-        ((target_info.x_coordinate.pow(2) + target_info.y_coordinate.pow(2)) as u32).isqrt();
-    // == actua distance == //
+    // == actual distance == //
+    // convert x, y to i32 to prevent overflow
+    let x = i32::from(target_info.x_coordinate);
+    let y = i32::from(target_info.y_coordinate);
+    target_info.actual_distance = ((x.pow(2) + y.pow(2)) as u32).isqrt();
+    // == actual distance == //
 
     target_info
 }
