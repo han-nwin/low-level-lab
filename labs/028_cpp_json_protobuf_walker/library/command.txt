@@ -1,0 +1,1 @@
+protoc -I . --cpp_out=. common.proto customer.proto shipping.proto order.proto

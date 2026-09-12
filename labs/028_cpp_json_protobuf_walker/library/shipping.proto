@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package walker.practice;
+
+import "common.proto";
+
+message TrackingEvent {
+  message Location {
+    Address address = 1;
+    map<string, string> facility_details = 2;
+  }
+
+  string event_id = 1;
+  Location location = 2;
+  repeated string scans = 3;
+}
+
+message Package {
+  message Contents {
+    message Component {
+      string sku = 1;
+      uint32 quantity = 2;
+    }
+
+    repeated Component components = 1;
+    Money insured_value = 2;
+  }
+
+  string package_id = 1;
+  Contents contents = 2;
+  repeated TrackingEvent events = 3;
+}
+
+message Shipment {
+  string shipment_id = 1;
+  map<string, Package> packages = 2;
+  Address destination = 3;
+}

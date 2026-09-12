@@ -1,0 +1,139 @@
+{
+  "orderId": "ORD-2026-0042",
+  "customer": {
+    "customerId": "CUS-1001",
+    "displayName": "Alex Chen",
+    "verified": "true",
+    "shippingAddress": {
+      "street": "123 Oak Street",
+      "city": "Chicago",
+      "postalCode": 60601,
+      "countryCode": "US",
+      "apartment": "4B"
+    },
+    "tags": ["returning", 42, "newsletter"],
+    "email": "alex@example.com",
+    "phone": "+1-312-555-0100"
+  },
+  "items": [
+    {
+      "sku": "MUG-BLUE",
+      "quantity": 2,
+      "unitPrice": {
+        "currencyCode": "USD",
+        "units": "15",
+        "nanos": 500000000
+      },
+      "options": ["blue", "gift-wrap"]
+    },
+    {
+      "sku": "NOTEBOOK-A5",
+      "quantity": -1,
+      "unitPrice": {
+        "currencyCode": "USD",
+        "units": "12",
+        "nanos": "half"
+      },
+      "options": "lined"
+    }
+  ],
+  "status": "ORDER_STATUS_DELIVERED",
+  "labels": {
+    "channel": "web",
+    "priority": 3
+  },
+  "deliveryLocations": {
+    "home": {
+      "street": "123 Oak Street",
+      "city": "Chicago",
+      "postalCode": "60601",
+      "countryCode": "US"
+    },
+    "office": "500 Market Street"
+  },
+  "total": {
+    "currencyCode": "USD",
+    "units": "43",
+    "nanos": 0
+  },
+  "shipments": [
+    {
+      "shipmentId": "SHIP-001",
+      "packages": {
+        "box-a": {
+          "packageId": "PKG-001",
+          "contents": {
+            "components": [
+              { "sku": "MUG-BLUE", "quantity": 2 },
+              { "sku": "NOTEBOOK-A5", "quantity": "several" }
+            ],
+            "insuredValue": {
+              "currencyCode": ["USD"],
+              "units": "43",
+              "nanos": 0
+            }
+          },
+          "events": [
+            {
+              "eventId": "SCAN-001",
+              "location": {
+                "address": {
+                  "street": "100 Warehouse Road",
+                  "city": "Chicago",
+                  "postalCode": "60608",
+                  "countryCode": "US"
+                },
+                "facilityDetails": { "building": "north", "dock": "7" }
+              },
+              "scans": ["received", "sorted"]
+            },
+            {
+              "eventId": "SCAN-002",
+              "location": {
+                "address": {
+                  "street": "200 Transfer Road",
+                  "city": false,
+                  "postalCode": "60609",
+                  "countryCode": "US"
+                },
+                "facilityDetails": { "building": "south", "dock": 8 }
+              },
+              "scans": ["loaded", { "code": "departed" }],
+              "operatorName": "Sam"
+            }
+          ]
+        },
+        "box-b": {
+          "packageId": "PKG-002",
+          "contents": {
+            "components": { "sku": "GIFT-CARD", "quantity": 1 },
+            "insuredValue": { "currencyCode": "USD", "units": "10", "nanos": 0 }
+          },
+          "events": []
+        }
+      },
+      "destination": {
+        "street": "123 Oak Street",
+        "city": "Chicago",
+        "postalCode": "60601",
+        "countryCode": "US"
+      }
+    },
+    {
+      "shipmentId": "SHIP-002",
+      "packages": [{ "packageId": "PKG-003" }],
+      "destination": {
+        "street": "500 Market Street",
+        "city": "Chicago",
+        "postalCode": "60602",
+        "countryCode": "US"
+      }
+    }
+  ],
+  "previousAddresses": {
+    "street": "9 Pine Avenue",
+    "city": "Madison",
+    "postalCode": "53703",
+    "countryCode": "US"
+  }
+}

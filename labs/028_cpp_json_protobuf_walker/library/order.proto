@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package walker.practice;
+
+import "common.proto";
+import "customer.proto";
+import "shipping.proto";
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_PENDING = 1;
+  ORDER_STATUS_SHIPPED = 2;
+  ORDER_STATUS_CANCELLED = 3;
+}
+
+message LineItem {
+  string sku = 1;
+  uint32 quantity = 2;
+  Money unit_price = 3;
+  repeated string options = 4;
+}
+
+message Order {
+  string order_id = 1;
+  Customer customer = 2;
+  repeated LineItem items = 3;
+  OrderStatus status = 4;
+  map<string, string> labels = 5;
+  map<string, Address> delivery_locations = 6;
+  Money total = 7;
+  repeated Address previous_addresses = 8;
+  optional string notes = 9;
+  repeated Shipment shipments = 10;
+}

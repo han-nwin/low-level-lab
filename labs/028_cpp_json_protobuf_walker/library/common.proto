@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package walker.practice;
+
+message Address {
+  string street = 1;
+  string city = 2;
+  string postal_code = 3;
+  string country_code = 4;
+}
+
+message Money {
+  string currency_code = 1;
+  int64 units = 2;
+  int32 nanos = 3;
+}

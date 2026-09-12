@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package walker.practice;
+
+import "common.proto";
+
+message Customer {
+  string customer_id = 1;
+  string display_name = 2;
+  bool verified = 3;
+  Address shipping_address = 4;
+  repeated string tags = 5;
+
+  oneof contact {
+    string email = 6;
+    string phone = 7;
+  }
+}

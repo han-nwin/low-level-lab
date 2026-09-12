@@ -1,0 +1,9 @@
+-Wall 
+-Wextra 
+-Werror 
+-std=c++23
+-Iinclude
+-Ilibrary
+/opt/homebrew/lib/libboost_json.dylib
+-DBOOST_LOG_DYN_LINK
+/opt/homebrew/lib/libboost_log.dylib
