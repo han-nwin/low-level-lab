@@ -36,7 +36,7 @@ inline std::string walker(const boost::json::value &json, const google::protobuf
         if (field->is_repeated()) {
             return std::string{"array"};
         }
-        // NOTE: this is put after is repeated ententionally for reapeated message type
+        // NOTE: this is put after is_repeated ententionally for reapeated message type
         if (field->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) {
             return std::string{"object"};
         }
