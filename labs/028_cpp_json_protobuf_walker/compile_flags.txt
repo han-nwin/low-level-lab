@@ -1,6 +1,5 @@
 -Wall 
 -Wextra 
--Werror 
 -std=c++23
 -Iinclude
 -Ilibrary
