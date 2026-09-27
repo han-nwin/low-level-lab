@@ -11,6 +11,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <variant>
 #include <vector>
 
 struct NotImplemented : std::logic_error {
@@ -28,6 +29,53 @@ struct NotImplemented : std::logic_error {
 // Stay within C++20: std::ranges::to, std::views::zip, and
 // std::views::chunk are not available yet. To collect a view into a vector,
 // use a loop or std::ranges::copy with std::back_inserter.
+
+// 0. Event dispatch: std::variant, std::visit, and overloaded lambdas
+// ----------------------------------------------------------------
+// An Event holds exactly one of Login, Logout, or Message.
+// Implement handle(const Event&) to return an owning description string:
+//   Login{"alice"} -> "login: alice"
+//   Logout{}       -> "logout"
+//   Message{"hi"}  -> "message: hi"
+// Empty usernames and message text are allowed; keep the trailing space:
+//   Login{""} -> "login: "; Message{""} -> "message: ".
+// Requirements: use std::visit and the overloaded helper below, with one
+// lambda per alternative. Accept each alternative by const reference and
+// return std::string from every lambda. Do not modify the event.
+// The helper inherits each lambda's operator() and brings them into one
+// overload set. C++20 aggregate deduction lets overloaded{...} infer its
+// lambda types without an explicit deduction guide. variant and visit
+// themselves were introduced in C++17.
+// Check: all three alternatives, empty payloads, and switching alternatives.
+// Explain: how does visit choose a handler? Why must every alternative be
+// handled and every lambda return the same type for this visit call?
+// Why does returning "logout" alone deduce a different type from returning
+// std::string{"logout"} when the lambda has no explicit return type?
+
+struct Login {
+    std::string username;
+};
+
+struct Logout {};
+
+struct Message {
+    std::string text;
+};
+
+using Event = std::variant<Login, Logout, Message>;
+
+// class... Ts: a pack of types (here, lambda types); Ts...: inherit from each.
+// using Ts::operator()...: expose every lambda's call operator as an overload.
+template <class... Ts> struct overloaded : Ts... {
+    using Ts::operator()...;
+};
+
+std::string handle(const Event &event) {
+    return std::visit(overloaded{[]([[maybe_unused]] const Login &e) -> std::string { return "login: " + e.username; },
+                                 [](const Logout &) -> std::string { return "logout"; },
+                                 []([[maybe_unused]] const Message &e) -> std::string { return "message: " + e.text; }},
+                      event);
+}
 
 // 1. Sensor dashboard: filter and transform (warm-up)
 // -------------------------------------------------
@@ -239,6 +287,32 @@ int main() {
     using tests::expect_values;
     using tests::require;
     using tests::run;
+
+    run("0. login and unchanged event", [] {
+        const Event event = Login{"alice"};
+        require(handle(event) == "login: alice", "expected login description");
+        require(std::holds_alternative<Login>(event) && std::get<Login>(event).username == "alice",
+                "login event changed");
+    });
+    run("0. logout", [] { require(handle(Event{Logout{}}) == "logout", "expected logout description"); });
+    run("0. message and unchanged event", [] {
+        const Event event = Message{"hello world!"};
+        require(handle(event) == "message: hello world!", "expected full message text");
+        require(std::holds_alternative<Message>(event) && std::get<Message>(event).text == "hello world!",
+                "message event changed");
+    });
+    run("0. empty username",
+        [] { require(handle(Event{Login{""}}) == "login: ", "keep the prefix and trailing space"); });
+    run("0. empty message",
+        [] { require(handle(Event{Message{""}}) == "message: ", "keep the prefix and trailing space"); });
+    run("0. switching alternatives", [] {
+        Event event = Login{"bob"};
+        require(handle(event) == "login: bob", "expected login handler");
+        event = Message{"bye"};
+        require(handle(event) == "message: bye", "expected message handler");
+        event = Logout{};
+        require(handle(event) == "logout", "expected logout handler");
+    });
 
     run("1. sensor example", [] { expect_values(sensor({-40, 0, 10, 20, 100, 200}), {32.0, 50.0, 68.0}); });
     run("1. inclusive boundaries", [] { expect_values(sensor({-31, -30, 120, 121}), {-22.0, 248.0}); });
