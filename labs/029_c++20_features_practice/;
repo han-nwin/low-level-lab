@@ -97,13 +97,10 @@ std::vector<Order> paid_orders([[maybe_unused]] std::span<const Order> orders) {
 }
 
 std::optional<Order> find_order([[maybe_unused]] std::span<const Order> orders, [[maybe_unused]] int id) {
-    auto found = std::ranges::find(orders, id, &Order::id);
-
-    if (found == orders.end()) {
-        return std::nullopt;
-    }
-
-    return *found;
+    auto found = std::ranges::find(orders, id, [&id](const Order &order) { return order.id == id; });
+    std::cout << found;
+    // TODO: use ranges::find with a projection; return a copy or nullopt.
+    throw NotImplemented{};
 }
 
 // 3. Live data versus a snapshot: understand lazy views
