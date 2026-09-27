@@ -91,16 +91,14 @@ std::vector<Order> paid_orders([[maybe_unused]] std::span<const Order> orders) {
         result.push_back(v);
     }
 
-    for (auto r : result) {
-        std::cout << r << std::endl;
-    }
+    std::ranges::stable_sort(result, std::greater{}, &Order::total_cents);
 
-    // TODO:
-    throw NotImplemented{};
+    return result;
 }
 
 std::optional<Order> find_order([[maybe_unused]] std::span<const Order> orders, [[maybe_unused]] int id) {
     // TODO: use ranges::find with a projection; return a copy or nullopt.
+    throw NotImplemented{};
 }
 
 // 3. Live data versus a snapshot: understand lazy views
