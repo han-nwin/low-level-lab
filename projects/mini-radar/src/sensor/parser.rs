@@ -6,7 +6,7 @@ pub struct Parser {
     state: ParserState,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum ParserState {
     Header,
     Data,
@@ -45,7 +45,7 @@ impl Parser {
     }
 
     pub fn push(&mut self, byte: u8) -> ParserState {
-        // if still at header, check header
+        // check header
         if self.current_byte < 4 {
             self.state = ParserState::Header;
             // correct
@@ -63,16 +63,22 @@ impl Parser {
 
         // check footer
         if self.current_byte == 28 || self.current_byte == 29 {
-            self.state = ParserState::Eof;
-            if byte == FOOTER[self.current_byte - 28] {
-                self.buffer[self.current_byte] = byte;
-                self.current_byte += 1;
-                return ParserState::Eof;
-            } else {
-                // soomething wrong, reset and go back to header
+            // Something wrong, reset to header
+            if byte != FOOTER[self.current_byte - 28] {
                 self.reset();
                 return ParserState::Header;
             }
+
+            self.buffer[self.current_byte] = byte;
+            self.current_byte += 1;
+
+            self.state = if self.current_byte == 30 {
+                ParserState::Eof
+            } else {
+                ParserState::Data
+            };
+
+            return self.state;
         }
 
         // data

@@ -1,0 +1,144 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+<!-- next-header -->
+## Unreleased - ReleaseDate
+
+- `tcp::client` and `dns::DnsClient` (the `embedded-nal-async` trait implementations) are now gated behind the `embedded-nal` feature.
+- Changed underlying network stack from `smoltcp` to [`xarxa`](https://github.com/embassy-rs/xarxa).
+  - Increases perf, decreases code size. See [benchmarks](https://github.com/embassy-rs/xarxa#benchmarks)
+  - Fixes many bugs, some inherent to `smoltcp` design.
+- Driver implementations must now implement `xarxa-driver` instead of `embassy-net-driver`.
+- You can now attach multiple interfaces to the network stack.
+- UDP and raw sockets are now zero-copy.
+- `UdpSocket::bind` now takes a local and a remote address.
+- Added TCP socket methods: `is_open`, `is_active`, `timeout`, `keep_alive`, `hop_limit`, `nagle_enabled`, `set_ack_delay`, `ack_delay`, `take_icmp_error` (feature `icmp-errors`).
+- Added `peek` methods to TCP, UDP and raw sockets.
+- Added `can_recv` and `hop_limit` to `UdpSocket`, and `can_recv` and `mode` to `RawSocket`.
+- Added `Stack::ifaces`, `Stack::reassembly_timeout` and `Stack::set_reassembly_timeout`.
+- Added `Iface::pan_id`, `Iface::set_pan_id`, `Iface::sixlowpan_address_context` and `Iface::set_sixlowpan_address_context` (feature `medium-ieee802154`).
+- Added `TcpListener`, used to accept incoming connections. Replcaes `TcpSocket::listen()`.
+  - More memory-efficient: you only need to allocate TCP buffers when actually accepting a connection.
+  - Avoids sending spurious RSTs that previously happened when all listening sockets were connected.
+- Reworked interface configuration to be simpler.
+  - DHCPv4 and SLAAC are configurable per-interface
+  - You can now add additional addresses manually even if using DHCPv4 or SLAAC.
+- Added a DHCPv4 server (feature `dhcpv4-server`).
+- Socket and buffer counts are configured via Cargo features instead of `StackResources` generic args.
+- `IcmpSocket` is gone.
+  - ICMP errors related to sent packets can be retrieved from sockets (feature `icmp-errors`).
+  - For other ICMP uses (e.g. pings) use a raw socket instead.
+- Socket and listener constructors no longer panic when the stack is out of slots, they return `Err(Full)` instead.
+- Added APIs to access and edit the route table
+- Added APIs to access and edit the neighbor cache
+- Feature `proto-ipv4`/`proto-ipv6` renamed to `ipv4`/`ipv6`.
+- Feature `icmp-ping-reply` is no longer enabled by default. Enable it if you want your device to respond to pings.
+- Wire types (`Ipv4Addr`, `IpCidr`, ...) moved to `embassy_net::wire`.
+- Implement `core::error::Error` for `dns::Error`, `tcp::AcceptError`, `udp::SendError` and `udp::RecvError`.
+- Prevent double DHCP DISCOVER on link state change.
+- Add functions to query the configuration state of IPv4 and IPv6 separately.
+- Removed `UdpSocket::wait_send_ready`, `UdpSocket::poll_send_ready`, `UdpSocket::may_send`, `UdpSocket::may_recv`, `RawSocket::wait_send_ready` and `RawSocket::poll_send_ready`.
+- tcp: `wait_read_ready`, `wait_write_ready`, `ReadReady` and `WriteReady` now also report ready when the connection half is closed.
+
+## 0.9.1 - 2026-04-16
+
+- Avoid busy looping if network driver's TX buffer is exhausted
+
+## 0.9.0 - 2026-03-10
+
+- raw: Removed unnecessary Driver type parameter from `RawSocket::new`
+- `{UdpSocket, IcmpSocket}::send_to_with` support writing less than `max_size` into the buffer by returning the number of bytes written from the closure
+- Update embassy-sync 0.8.0
+
+## 0.8.0 - 2026-01-04
+
+- tcp: Add `set_nagle_enabled()` to control TcpSocket nagle algorithm.
+- update to embedded-io 0.7
+- update to embedded-nal 0.9
+
+## 0.7.1 - 2025-08-26
+
+No unreleased changes yet... Quick, go send a PR!
+
+## 0.7 - 2025-05-06
+
+- don't infinite loop if udp::send methods receive a buffer too large to ever be sent
+- add ICMP sockets and a ping utility
+- configurable rate_limit for the ping utility
+- Feature match udp sockets
+
+## 0.6 - 2025-01-05
+
+- Make `Config` constructors `const`
+- The `std` feature has been removed
+- Updated `embassy-time` to v0.4
+
+## 0.5 - 2024-11-28
+
+- Refactor the API structure, simplifying lifetimes and generics.
+    - Stack is now a thin handle that implements `Copy+Clone`. Instead of passing `&Stack` around, you can now pass `Stack`.
+    - `Stack` and `DnsSocket` no longer need a generic parameter for the device driver.
+    - The `run()` method has been moved to a new `Runner` struct.
+    - Sockets are covariant wrt their lifetime.
+    - An implication of the refactor is now you need only one `StaticCell` instead of two if you need to share the network stack between tasks.
+- Use standard `core::net` IP types instead of custom ones from xarxa.
+- Update to `xarxa` v0.12.
+- Add `mdns` Cargo feature.
+- dns: properly handle `AddrType::Either` in `get_host_by_name()`
+- dns: truncate instead of panic if the DHCP server gives us more DNS servers than the configured maximum.
+- stack: add `wait_link_up()`, `wait_link_down()`, `wait_config_down()`.
+- tcp: Add `recv_queue()`, `send_queue()`.
+- tcp: Add `wait_read_ready()`, `wait_write_ready()`.
+- tcp: allow setting timeout through `embedded-nal` client.
+- tcp: fix `flush()` hanging forever if socket is closed with pending data.
+- tcp: fix `flush()` not waiting for ACK of FIN.
+- tcp: implement `ReadReady`, `WriteReady` traits from `embedded-io`.
+- udp, raw: Add `wait_send_ready()`, `wait_recv_ready()`, `flush()`.
+- udp: add `recv_from_with()`, `send_to_with()` methods, allowing for IO with one less copy.
+- udp: send/recv now takes/returns full `UdpMetadata` instead of just the remote `IpEndpoint`.
+- raw: add raw sockets.
+
+
+## 0.4 - 2024-01-11
+
+- Update to `embassy-time` v0.3.
+
+## 0.3 - 2024-01-04
+
+- Added `ReadReady` and `WriteReady` impls on `TcpSocket`.
+- Avoid never resolving `TcpIo::read` when the output buffer is empty.
+- Update to `xarxa` v0.11.
+- Forward constants from `xarxa` in DNS query results so changing DNS result size in `xarxa` properly propagates.
+- Removed the nightly feature.
+
+## 0.2.1 - 2023-10-31
+
+- Re-add impl_trait_projections
+- Fix: Reset DHCP socket when the link up is detected 
+
+## 0.2.0 - 2023-10-18
+
+- Re-export `xarxa::wire::IpEndpoint`
+- Add poll functions on UdpSocket
+- Make dual-stack work in embassy-net
+- Fix multicast support
+- Allow ethernet and 802.15.4 to coexist
+- Add IEEE802.15.4 address to embassy net Stack
+- Use HardwareAddress in Driver
+- Add async versions of xarxa's `send` and `recv` closure based API
+- add error translation to tcp errors
+- Forward TCP/UDP socket capacity impls
+- allow changing IP config at runtime
+- allow non-'static drivers
+- Remove impl_trait_projections
+- update embedded-io, embedded-nal-async
+- add support for dhcp hostname option
+- Wake stack's task after queueing a DNS query
+
+## 0.1.0 - 2023-06-29
+
+- First release

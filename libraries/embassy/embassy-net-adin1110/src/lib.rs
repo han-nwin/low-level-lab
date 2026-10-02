@@ -1,0 +1,1628 @@
+#![cfg_attr(not(test), no_std)]
+#![deny(clippy::pedantic)]
+#![allow(async_fn_in_trait)]
+#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
+
+// must go first!
+mod fmt;
+
+mod crc32;
+
+#[cfg(feature = "generic-spi")]
+mod crc8;
+
+mod mdio;
+mod phy;
+mod protocol;
+mod regs;
+
+#[cfg(feature = "tc6")]
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use ch::driver::{LinkState, PacketBuf};
+pub use crc32::ETH_FCS;
+use embassy_futures::select::{Either, select};
+use embassy_net_driver_channel as ch;
+use embassy_time::Timer;
+use embedded_hal_1::digital::OutputPin;
+use embedded_hal_async::digital::Wait;
+use embedded_hal_async::spi::Error;
+#[cfg(any(feature = "generic-spi", feature = "tc6"))]
+use embedded_hal_async::spi::SpiDevice;
+pub use mdio::MdioBus;
+pub use phy::Phy10BaseT1x;
+#[cfg(feature = "generic-spi")]
+use phy::RegsC22;
+use phy::RegsC45;
+pub use protocol::Adin1110Protocol;
+#[cfg(feature = "generic-spi")]
+pub use protocol::GenericSpi;
+#[cfg(feature = "packetmeta-id")]
+pub use protocol::{
+    PACKET_ID_ALL_PORTS, PACKET_ID_DEFAULT_PORT, PACKET_ID_PORT_MASK, PACKET_ID_PORT1, PACKET_ID_PORT2,
+};
+#[cfg(feature = "tc6")]
+pub use protocol::{Tc6, TxPort};
+use regs::{Config0, Config2, SpiRegisters as sr, Status0, Status1};
+
+#[cfg(feature = "generic-spi")]
+use crate::regs::{LedCntrl, LedFunc, LedPol, LedPolarity};
+
+/// ADIN1110 intern PHY ID
+pub const PHYID_ADIN1110: u32 = 0x0283_BC91;
+/// ADIN2111 intern PHY ID
+pub const PHYID_ADIN2111: u32 = 0x0283_BCA1;
+
+/// Error values ADIN1110
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[allow(non_camel_case_types)]
+pub enum AdinError<E> {
+    /// SPI-BUS Error
+    Spi(#[cfg_attr(feature = "defmt", defmt(Debug2Format))] E),
+    /// Ethernet FCS error
+    FCS,
+    /// SPI Header CRC error
+    SPI_CRC,
+    /// Received or sent ethernet packet is too big
+    PACKET_TOO_BIG,
+    /// Received or sent ethernet packet is too small
+    PACKET_TOO_SMALL,
+    /// MDIO transaction timeout
+    MDIO_ACC_TIMEOUT,
+    /// The echoed TC6 header does not match what was sent
+    SPI_TC6_HEADER_MISMATCH,
+    /// The TC6 footer reports the MAC-PHY configuration is no longer in sync
+    TC6_SYNC,
+    /// Timed out waiting for TC6 transmit credits or receive chunks
+    TC6_TIMEOUT,
+    /// A protected control read returned data that did not match its complement
+    TC6_PROTECTION,
+}
+
+/// Type alias `Result` type with `AdinError` as error type.
+pub type AEResult<T, SPIError> = core::result::Result<T, AdinError<SPIError>>;
+
+/// Internet PHY address
+pub const MDIO_PHY_ADDR: u8 = 0x01;
+
+/// MDIO address of the port 2 PHY on the ADIN2111.
+#[cfg(feature = "tc6")]
+const MDIO_PHY_ADDR_PORT2: u8 = 0x02;
+
+/// Maximum Transmission Unit
+pub const MTU: usize = 1514;
+
+/// Max SPI/Frame buffer size
+pub const MAX_BUFF: usize = 2048;
+
+#[cfg(feature = "generic-spi")]
+const DONT_CARE_BYTE: u8 = 0x00;
+#[cfg(feature = "generic-spi")]
+const TURN_AROUND_BYTE: u8 = 0x00;
+
+/// Packet minimal frame/packet length
+const ETH_MIN_LEN: usize = 64;
+/// Ethernet `Frame Check Sequence` length
+const FCS_LEN: usize = 4;
+/// Frame Header length
+#[cfg(feature = "generic-spi")]
+const FRAME_HEADER_LEN: usize = 2;
+
+/// P1 = 0x00, P2 = 0x01
+#[cfg(feature = "generic-spi")]
+const PORT_ID_BYTE: u8 = 0x00;
+
+/// Type alias for the embassy-net driver for ADIN1110
+pub type Device<'d> = embassy_net_driver_channel::Device<'d>;
+
+/// Internal state for the embassy-net integration.
+pub struct State<const N_RX: usize, const N_TX: usize> {
+    ch_state: ch::State<N_RX, N_TX>,
+    #[cfg(feature = "tc6")]
+    port_link: [AtomicBool; 2],
+}
+impl<const N_RX: usize, const N_TX: usize> State<N_RX, N_TX> {
+    /// Create a new `State`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            ch_state: ch::State::new(),
+            #[cfg(feature = "tc6")]
+            port_link: [AtomicBool::new(false), AtomicBool::new(false)],
+        }
+    }
+}
+impl<const N_RX: usize, const N_TX: usize> Default for State<N_RX, N_TX> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Per-port link state, obtained from [`Runner::port_links`].
+#[cfg(feature = "tc6")]
+#[derive(Debug, Clone, Copy)]
+pub struct PortLinks<'d> {
+    port_link: &'d [AtomicBool; 2],
+    port_count: u8,
+}
+
+#[cfg(feature = "tc6")]
+impl PortLinks<'_> {
+    /// The number of ports: 1 for the ADIN1110, 2 for the ADIN2111.
+    #[must_use]
+    pub fn port_count(self) -> u8 {
+        self.port_count
+    }
+
+    /// Whether the link on `port` (1 or 2) is up.
+    #[must_use]
+    pub fn link_up(self, port: u8) -> bool {
+        self.port_link[usize::from(port) - 1].load(Ordering::Relaxed)
+    }
+}
+
+/// ADIN1110 embassy-net driver
+#[derive(Debug)]
+pub struct ADIN1110<P: Adin1110Protocol> {
+    /// Protocol implementation (Generic SPI or OPEN Alliance TC6) wrapping the SPI device.
+    protocol: P,
+}
+
+impl<P: Adin1110Protocol> ADIN1110<P> {
+    /// Create a new ADIN1110 instance.
+    pub fn new(protocol: P) -> Self {
+        Self { protocol }
+    }
+
+    /// Read a SPI register
+    pub async fn read_reg(&mut self, reg: sr) -> AEResult<u32, P::SpiError> {
+        self.protocol.read_reg(reg.into()).await
+    }
+
+    /// Write a SPI register
+    pub async fn write_reg(&mut self, reg: sr, value: u32) -> AEResult<(), P::SpiError> {
+        self.protocol.write_reg(reg.into(), value).await
+    }
+
+    /// helper function for write to an `MDIO_ACC` register and wait for ready!
+    async fn write_mdio_acc_reg(&mut self, reg: sr, mdio_acc_val: u32) -> AEResult<u32, P::SpiError> {
+        self.write_reg(reg, mdio_acc_val).await?;
+
+        // TODO: Add proper timeout!
+        loop {
+            let val = self.read_reg(reg).await?;
+            if val & 0x8000_0000 != 0 {
+                return Ok(val);
+            }
+        }
+    }
+
+    /// Read out fifo ethernet packet memory received via the wire.
+    pub async fn read_fifo(&mut self, frame: &mut [u8]) -> AEResult<usize, P::SpiError> {
+        self.protocol.read_fifo(frame).await
+    }
+
+    /// Write to fifo ethernet packet memory send over the wire.
+    pub async fn write_fifo(&mut self, frame: &[u8]) -> AEResult<(), P::SpiError> {
+        self.protocol.write_fifo(frame).await
+    }
+
+    /// Programs the mac address in the mac filters.
+    /// Also set the boardcast address.
+    /// The chip supports 2 priority queues but current code doesn't support this mode.
+    pub async fn set_mac_addr(&mut self, mac: &[u8; 6]) -> AEResult<(), P::SpiError> {
+        // Apply to port 1.
+        self.set_mac_addr_filters(mac, 1 << 30).await
+    }
+
+    /// Programs the mac address and broadcast address filters, forwarding
+    /// matching frames to the host from the ports given in `apply_ports`
+    /// (bit 30: port 1, bit 31: port 2).
+    async fn set_mac_addr_filters(&mut self, mac: &[u8; 6], apply_ports: u32) -> AEResult<(), P::SpiError> {
+        let mac_high_part = u16::from_be_bytes(mac[0..2].try_into().unwrap());
+        let mac_low_part = u32::from_be_bytes(mac[2..6].try_into().unwrap());
+
+        // program our mac address in the mac address filter
+        self.write_reg(sr::ADDR_FILT_UPR0, apply_ports | (1 << 16) | u32::from(mac_high_part))
+            .await?;
+        self.write_reg(sr::ADDR_FILT_LWR0, mac_low_part).await?;
+
+        self.write_reg(sr::ADDR_MSK_UPR0, u32::from(mac_high_part)).await?;
+        self.write_reg(sr::ADDR_MSK_LWR0, mac_low_part).await?;
+
+        // Also program broadcast address in the mac address filter
+        self.write_reg(sr::ADDR_FILT_UPR1, apply_ports | (1 << 16) | 0xFFFF)
+            .await?;
+        self.write_reg(sr::ADDR_FILT_LWR1, 0xFFFF_FFFF).await?;
+        self.write_reg(sr::ADDR_MSK_UPR1, 0xFFFF).await?;
+        self.write_reg(sr::ADDR_MSK_LWR1, 0xFFFF_FFFF).await?;
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "generic-spi")]
+impl<SPI: SpiDevice> ADIN1110<GenericSpi<SPI>> {
+    /// Create a driver instance using the Generic SPI protocol.
+    pub fn new_generic(spi: SPI, spi_crc: bool, append_fcs_on_tx: bool) -> Self {
+        Self::new(GenericSpi::new(spi, spi_crc, append_fcs_on_tx))
+    }
+}
+
+#[cfg(feature = "tc6")]
+impl<SPI: SpiDevice> ADIN1110<Tc6<SPI>> {
+    /// Create a driver instance using the OPEN Alliance TC6 SPI protocol.
+    pub fn new_tc6(spi: SPI, append_fcs_on_tx: bool, tx_port: TxPort) -> Self {
+        Self::new(Tc6::new(spi, append_fcs_on_tx, tx_port))
+    }
+
+    /// Match the control transaction format to `CONFIG0.PROTE`.
+    /// See [`Tc6::set_protected`].
+    pub fn set_protected(&mut self, protected: bool) {
+        self.protocol.set_protected(protected);
+    }
+
+    /// Set the number of ports. See [`Tc6::set_port_count`].
+    pub fn set_port_count(&mut self, port_count: u8) {
+        self.protocol.set_port_count(port_count);
+    }
+}
+
+impl<P: Adin1110Protocol> mdio::MdioBus for ADIN1110<P> {
+    type Error = AdinError<P::SpiError>;
+
+    /// Read from the PHY Registers as Clause 22.
+    async fn read_cl22(&mut self, phy_id: u8, reg: u8) -> Result<u16, Self::Error> {
+        let mdio_acc_val: u32 =
+            (0x1 << 28) | u32::from(phy_id & 0x1F) << 21 | u32::from(reg & 0x1F) << 16 | (0x3 << 26);
+
+        // Result is in the lower half of the answer.
+        #[allow(clippy::cast_possible_truncation)]
+        self.write_mdio_acc_reg(sr::MDIO_ACC, mdio_acc_val)
+            .await
+            .map(|val| val as u16)
+    }
+
+    /// Read from the PHY Registers as Clause 45.
+    ///
+    /// A clause 45 access is two MDIO transactions: an address phase and the
+    /// read itself. They must be queued in *separate* `MDIOACC` registers, the
+    /// chip executes them in order. Putting both in `MDIOACC_0` makes the
+    /// second overwrite the first and the read returns zero.
+    async fn read_cl45(&mut self, phy_id: u8, regc45: (u8, u16)) -> Result<u16, Self::Error> {
+        let mdio_acc_val = u32::from(phy_id & 0x1F) << 21 | u32::from(regc45.0 & 0x1F) << 16 | u32::from(regc45.1);
+
+        self.write_reg(sr::MDIO_ACC, mdio_acc_val).await?;
+
+        let mdio_acc_val = u32::from(phy_id & 0x1F) << 21 | u32::from(regc45.0 & 0x1F) << 16 | (0x03 << 26);
+
+        // Result is in the lower half of the answer.
+        #[allow(clippy::cast_possible_truncation)]
+        self.write_mdio_acc_reg(sr::MDIO_ACC_1, mdio_acc_val)
+            .await
+            .map(|val| val as u16)
+    }
+
+    /// Write to the PHY Registers as Clause 22.
+    async fn write_cl22(&mut self, phy_id: u8, reg: u8, val: u16) -> Result<(), Self::Error> {
+        let mdio_acc_val: u32 =
+            (0x1 << 28) | u32::from(phy_id & 0x1F) << 21 | u32::from(reg & 0x1F) << 16 | (0x1 << 26) | u32::from(val);
+
+        self.write_mdio_acc_reg(sr::MDIO_ACC, mdio_acc_val).await.map(|_| ())
+    }
+
+    /// Write to the PHY Registers as Clause 45.
+    ///
+    /// See [`read_cl45`](Self::read_cl45): the address phase and the write must
+    /// go in separate `MDIOACC` registers.
+    async fn write_cl45(&mut self, phy_id: u8, regc45: (u8, u16), value: u16) -> AEResult<(), P::SpiError> {
+        let phy_id = u32::from(phy_id & 0x1F) << 21;
+        let dev_addr = u32::from(regc45.0 & 0x1F) << 16;
+        let reg = u32::from(regc45.1);
+
+        let mdio_acc_val: u32 = phy_id | dev_addr | reg;
+        self.write_reg(sr::MDIO_ACC, mdio_acc_val).await?;
+
+        let mdio_acc_val: u32 = phy_id | dev_addr | (0x01 << 26) | u32::from(value);
+        self.write_mdio_acc_reg(sr::MDIO_ACC_1, mdio_acc_val).await.map(|_| ())
+    }
+}
+
+/// Background runner for the ADIN1110.
+///
+/// You must call `.run()` in a background task for the ADIN1110 to operate.
+pub struct Runner<'d, P: Adin1110Protocol, INT, RST> {
+    mac: ADIN1110<P>,
+    ch: ch::Runner<'d>,
+    int: INT,
+    #[cfg_attr(not(feature = "generic-spi"), allow(dead_code))]
+    is_link_up: bool,
+    #[cfg(feature = "tc6")]
+    port_link: &'d [AtomicBool; 2],
+    _reset: RST,
+}
+
+#[cfg(feature = "generic-spi")]
+impl<SPI: SpiDevice, INT: Wait, RST: OutputPin> Runner<'_, GenericSpi<SPI>, INT, RST> {
+    /// Run the driver.
+    #[allow(clippy::too_many_lines)]
+    pub async fn run(mut self) -> ! {
+        let (state_chan, mut rx_chan, mut tx_chan) = self.ch.split();
+
+        loop {
+            debug!("Waiting for interrupts");
+            match select(self.int.wait_for_low(), tx_chan.tx()).await {
+                Either::First(_) => {
+                    let mut status1_clr = Status1(0);
+                    let mut status1 = Status1(self.mac.read_reg(sr::STATUS1).await.unwrap());
+
+                    while status1.p1_rx_rdy() {
+                        debug!("alloc RX packet buffer");
+                        match select(rx_chan.rx_ready(), tx_chan.tx()).await {
+                            // Handle frames that needs to transmit from the wire.
+                            // Note: rx_chan.rx_ready() doesn't complete while the
+                            //       tx_chan is full. So these will be handled
+                            //       automaticly.
+                            Either::First(()) => {
+                                let Some(mut frame) = PacketBuf::try_new() else {
+                                    error!("packet pool empty, can't receive");
+                                    // Back off, so we don't spin until the stack frees a buffer.
+                                    Timer::after_millis(1).await;
+                                    continue;
+                                };
+                                frame.set_len(MTU);
+                                match self.mac.read_fifo(&mut frame).await {
+                                    Ok(n) => {
+                                        frame.set_len(n);
+                                        rx_chan.rx(frame).await;
+                                    }
+                                    Err(e) => match e {
+                                        AdinError::PACKET_TOO_BIG => {
+                                            error!("RX Packet too big, DROP");
+                                            self.mac.write_reg(sr::FIFO_CLR, 1).await.unwrap();
+                                        }
+                                        AdinError::PACKET_TOO_SMALL => {
+                                            error!("RX Packet too small, DROP");
+                                            self.mac.write_reg(sr::FIFO_CLR, 1).await.unwrap();
+                                        }
+                                        AdinError::Spi(e) => {
+                                            error!("RX Spi error {}", e.kind());
+                                        }
+                                        e => {
+                                            error!("RX Error {:?}", e);
+                                        }
+                                    },
+                                }
+                            }
+                            Either::Second(frame) => {
+                                // Handle frames that needs to transmit to the wire.
+                                self.mac.write_fifo(&frame).await.unwrap();
+                            }
+                        }
+                        status1 = Status1(self.mac.read_reg(sr::STATUS1).await.unwrap());
+                    }
+
+                    let status0 = Status0(self.mac.read_reg(sr::STATUS0).await.unwrap());
+                    if status1.0 & !0x1b != 0 {
+                        error!("SPE CHIP STATUS 0:{:08x} 1:{:08x}", status0.0, status1.0);
+                    }
+
+                    if status1.tx_rdy() {
+                        status1_clr.set_tx_rdy(true);
+                        trace!("TX_DONE");
+                    }
+
+                    if status1.link_change() {
+                        let link = status1.p1_link_status();
+                        self.is_link_up = link;
+
+                        if link {
+                            let link_status = self
+                                .mac
+                                .read_cl45(MDIO_PHY_ADDR, RegsC45::DA7::AN_STATUS_EXTRA.into())
+                                .await
+                                .unwrap();
+
+                            let volt = if link_status & (0b11 << 5) == (0b11 << 5) {
+                                "2.4"
+                            } else {
+                                "1.0"
+                            };
+
+                            let mse = self
+                                .mac
+                                .read_cl45(MDIO_PHY_ADDR, RegsC45::DA1::MSE_VAL.into())
+                                .await
+                                .unwrap();
+
+                            info!("LINK Changed: Link Up, Volt: {} V p-p, MSE: {:0004}", volt, mse);
+                        } else {
+                            info!("LINK Changed: Link Down");
+                        }
+
+                        state_chan.set_link_state(if link { LinkState::Up } else { LinkState::Down });
+                        status1_clr.set_link_change(true);
+                    }
+
+                    if status1.tx_ecc_err() {
+                        error!("SPI TX_ECC_ERR error, CLEAR TX FIFO");
+                        self.mac.write_reg(sr::FIFO_CLR, 2).await.unwrap();
+                        status1_clr.set_tx_ecc_err(true);
+                    }
+
+                    if status1.rx_ecc_err() {
+                        error!("SPI RX_ECC_ERR error");
+                        status1_clr.set_rx_ecc_err(true);
+                    }
+
+                    if status1.spi_err() {
+                        error!("SPI SPI_ERR CRC error");
+                        status1_clr.set_spi_err(true);
+                    }
+
+                    if status0.phyint() {
+                        let crsm_irq_st = self
+                            .mac
+                            .read_cl45(MDIO_PHY_ADDR, RegsC45::DA1E::CRSM_IRQ_STATUS.into())
+                            .await
+                            .unwrap();
+
+                        let phy_irq_st = self
+                            .mac
+                            .read_cl45(MDIO_PHY_ADDR, RegsC45::DA1F::PHY_SYBSYS_IRQ_STATUS.into())
+                            .await
+                            .unwrap();
+
+                        warn!(
+                            "SPE CHIP PHY CRSM_IRQ_STATUS {:04x} PHY_SUBSYS_IRQ_STATUS {:04x}",
+                            crsm_irq_st, phy_irq_st
+                        );
+                    }
+
+                    if status0.txfcse() {
+                        error!("Ethernet Frame FCS and calc FCS don't match!");
+                    }
+
+                    // Clear status0
+                    self.mac.write_reg(sr::STATUS0, 0xFFF).await.unwrap();
+                    self.mac.write_reg(sr::STATUS1, status1_clr.0).await.unwrap();
+                }
+                Either::Second(packet) => {
+                    // Handle frames that needs to transmit to the wire.
+                    self.mac.write_fifo(&packet).await.unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "tc6")]
+impl<'d, SPI: SpiDevice, INT: Wait, RST: OutputPin> Runner<'d, Tc6<SPI>, INT, RST> {
+    /// Per-port link state, readable while the runner runs.
+    #[must_use]
+    pub fn port_links(&self) -> PortLinks<'d> {
+        PortLinks {
+            port_link: self.port_link,
+            port_count: self.mac.protocol.port_count(),
+        }
+    }
+
+    /// Run the driver.
+    ///
+    /// In OPEN Alliance mode the MAC-PHY asserts `INT_N` when receive chunks
+    /// become available, when transmit credits become available again or when
+    /// unmasked status bits are set. The host answers with an empty data chunk
+    /// to read a footer with the current RCA/TXC/EXST values, then services
+    /// receive data, transmit data and status in turn.
+    pub async fn run(self) -> ! {
+        let (state_chan, mut rx_chan, mut tx_chan) = self.ch.split();
+        let mut mac = self.mac;
+        let mut int = self.int;
+        let port_link = self.port_link;
+
+        loop {
+            let service_needed = mac.protocol.rx_available() || mac.protocol.ext_status();
+
+            if !service_needed {
+                debug!("Waiting for interrupts");
+                match select(int.wait_for_low(), tx_chan.tx()).await {
+                    Either::First(_) => {
+                        // Fetch a footer to learn the current RCA/TXC/EXST.
+                        if let Err(e) = mac.protocol.poll_status().await {
+                            Self::log_tc6_error("POLL", &e);
+                            Timer::after_millis(10).await;
+                            continue;
+                        }
+                    }
+                    Either::Second(frame) => {
+                        #[cfg(not(feature = "packetmeta-id"))]
+                        let result = mac.write_fifo(&frame).await;
+                        #[cfg(feature = "packetmeta-id")]
+                        let Some(result) = mac.protocol.transmit_packet(&frame).await else {
+                            continue;
+                        };
+                        match result {
+                            Ok(()) => trace!("TX Done"),
+                            Err(e) => Self::log_tc6_error("TX", &e),
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            if mac.protocol.ext_status() {
+                Self::handle_status(&mut mac, &state_chan, port_link).await;
+                mac.protocol.clear_ext_status();
+            }
+
+            while mac.protocol.rx_available() {
+                debug!("alloc RX packet buffer");
+                rx_chan.rx_ready().await;
+                let Some(mut frame) = PacketBuf::try_new() else {
+                    error!("packet pool empty, can't receive");
+                    // Back off, so we don't spin until the stack frees a buffer.
+                    Timer::after_millis(1).await;
+                    continue;
+                };
+                frame.set_len(MTU);
+                #[cfg(not(feature = "packetmeta-id"))]
+                let result = mac.read_fifo(&mut frame).await;
+                #[cfg(feature = "packetmeta-id")]
+                let result = mac.protocol.receive_packet(&mut frame).await;
+                match result {
+                    Ok(n) => {
+                        frame.set_len(n);
+                        rx_chan.rx(frame).await;
+                    }
+                    Err(e) => Self::log_tc6_error("RX", &e),
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::match_same_arms)]
+    fn log_tc6_error(ctx: &str, e: &AdinError<SPI::Error>) {
+        match e {
+            AdinError::PACKET_TOO_BIG => error!("{} Packet too big, DROP", ctx),
+            AdinError::PACKET_TOO_SMALL => error!("{} Packet too small, DROP", ctx),
+            AdinError::FCS => error!("{} Ethernet frame FCS mismatch, DROP", ctx),
+            AdinError::SPI_CRC => error!("{} TC6 footer parity error", ctx),
+            AdinError::SPI_TC6_HEADER_MISMATCH => error!("{} TC6 header rejected/mismatched", ctx),
+            AdinError::TC6_SYNC => error!("{} TC6 configuration lost (SYNC=0)!", ctx),
+            AdinError::TC6_TIMEOUT => error!("{} TC6 timeout waiting for the MAC-PHY", ctx),
+            AdinError::TC6_PROTECTION => error!("{} TC6 protected read integrity check failed", ctx),
+            AdinError::MDIO_ACC_TIMEOUT => error!("{} MDIO access timeout", ctx),
+            AdinError::Spi(e) => error!("{} SPI bus error {}", ctx, e.kind()),
+        }
+    }
+
+    /// Read, handle and acknowledge the MAC status registers, updating the
+    /// link state from the PHY interrupt status.
+    async fn handle_status(
+        mac: &mut ADIN1110<Tc6<SPI>>,
+        state_chan: &ch::StateRunner<'_>,
+        port_link: &[AtomicBool; 2],
+    ) {
+        let status0 = Status0(mac.read_reg(sr::STATUS0).await.unwrap());
+        let status1 = Status1(mac.read_reg(sr::STATUS1).await.unwrap());
+
+        trace!("SPE CHIP STATUS 0:{:08x} 1:{:08x}", status0.0, status1.0);
+
+        if status0.resetc() {
+            // Only expected right after reset; later on it means the chip
+            // rebooted behind our back (brown-out, watchdog, ...).
+            warn!("SPE CHIP was reset");
+        }
+
+        if status0.phyint() {
+            Self::service_phy_int(mac, state_chan, port_link, MDIO_PHY_ADDR, 0).await;
+        }
+
+        if status1.p2_phyint() {
+            Self::service_phy_int(mac, state_chan, port_link, MDIO_PHY_ADDR_PORT2, 1).await;
+        }
+
+        if status1.tx_ecc_err() {
+            error!("SPI TX_ECC_ERR error");
+        }
+
+        if status1.rx_ecc_err() {
+            error!("SPI RX_ECC_ERR error");
+        }
+
+        if status1.spi_err() {
+            error!("SPI SPI_ERR error");
+        }
+
+        if status0.txfcse() || status1.p2_txfcse() {
+            error!("Ethernet Frame FCS and calc FCS don't match!");
+        }
+
+        // Write-1-to-clear everything we have seen and handled.
+        mac.write_reg(sr::STATUS0, status0.0).await.unwrap();
+        mac.write_reg(sr::STATUS1, status1.0).await.unwrap();
+    }
+
+    /// Service a PHY interrupt: read (and thereby clear) the PHY interrupt
+    /// status registers and update the link state on link changes.
+    async fn service_phy_int(
+        mac: &mut ADIN1110<Tc6<SPI>>,
+        state_chan: &ch::StateRunner<'_>,
+        port_link: &[AtomicBool; 2],
+        phy_addr: u8,
+        port_idx: usize,
+    ) {
+        let crsm_irq_st = mac
+            .read_cl45(phy_addr, RegsC45::DA1E::CRSM_IRQ_STATUS.into())
+            .await
+            .unwrap();
+
+        let phy_irq_st = mac
+            .read_cl45(phy_addr, RegsC45::DA1F::PHY_SYBSYS_IRQ_STATUS.into())
+            .await
+            .unwrap();
+
+        trace!(
+            "PHY {} CRSM_IRQ_STATUS {:04x} PHY_SUBSYS_IRQ_STATUS {:04x}",
+            phy_addr, crsm_irq_st, phy_irq_st
+        );
+
+        // Link Status Change
+        if phy_irq_st & (1 << 1) != 0 {
+            // The link status bit in AN_STATUS latches low; read twice to get
+            // the current state.
+            let _ = mac.read_cl45(phy_addr, RegsC45::DA7::AN_STATUS.into()).await;
+            let an_status = mac.read_cl45(phy_addr, RegsC45::DA7::AN_STATUS.into()).await.unwrap();
+            let link = an_status & (1 << 2) != 0;
+            port_link[port_idx].store(link, Ordering::Relaxed);
+
+            if link {
+                info!("LINK Changed: port {} Link Up", port_idx + 1);
+            } else {
+                info!("LINK Changed: port {} Link Down", port_idx + 1);
+            }
+
+            let any_link = port_link.iter().any(|l| l.load(Ordering::Relaxed));
+            state_chan.set_link_state(if any_link { LinkState::Up } else { LinkState::Down });
+        }
+    }
+}
+
+/// Obtain a driver for using the ADIN1110 with [`embassy-net`](https://crates.io/crates/embassy-net),
+/// using the Generic SPI protocol.
+#[cfg(feature = "generic-spi")]
+pub async fn new<const N_RX: usize, const N_TX: usize, SPI: SpiDevice, INT: Wait, RST: OutputPin>(
+    mac_addr: [u8; 6],
+    state: &'_ mut State<N_RX, N_TX>,
+    spi_dev: SPI,
+    int: INT,
+    mut reset: RST,
+    spi_crc: bool,
+    append_fcs_on_tx: bool,
+) -> (Device<'_>, Runner<'_, GenericSpi<SPI>, INT, RST>) {
+    use crate::regs::{IMask0, IMask1};
+
+    info!("INIT ADIN1110");
+
+    // Reset sequence
+    reset.set_low().unwrap();
+
+    // Wait t1: 20-43mS
+    Timer::after_millis(30).await;
+
+    reset.set_high().unwrap();
+
+    // Wait t3: 50mS
+    Timer::after_millis(50).await;
+
+    // Create device
+    let mut mac = ADIN1110::new_generic(spi_dev, spi_crc, append_fcs_on_tx);
+
+    // Check PHYID
+    let id = mac.read_reg(sr::PHYID).await.unwrap();
+    assert_eq!(id, PHYID_ADIN1110);
+
+    debug!("SPE: CHIP MAC/ID: {:08x}", id);
+
+    #[cfg(any(feature = "defmt", feature = "log"))]
+    {
+        let adin_phy = Phy10BaseT1x::default();
+        let phy_id = adin_phy.get_id(&mut mac).await.unwrap();
+        debug!("SPE: CHIP: PHY ID: {:08x}", phy_id);
+    }
+
+    let mi_control = mac.read_cl22(MDIO_PHY_ADDR, RegsC22::CONTROL as u8).await.unwrap();
+    debug!("SPE CHIP PHY MI_CONTROL {:04x}", mi_control);
+    if mi_control & 0x0800 != 0 {
+        let val = mi_control & !0x0800;
+        debug!("SPE CHIP PHY MI_CONTROL Disable PowerDown");
+        mac.write_cl22(MDIO_PHY_ADDR, RegsC22::CONTROL as u8, val)
+            .await
+            .unwrap();
+    }
+
+    // Config0
+    let mut config0 = Config0(0x0000_0006);
+    config0.set_txfcsve(append_fcs_on_tx);
+    mac.write_reg(sr::CONFIG0, config0.0).await.unwrap();
+
+    // Config2
+    let mut config2 = Config2(0x0000_0800);
+    // crc_append must be disable if tx_fcs_validation_enable is true!
+    config2.set_crc_append(!append_fcs_on_tx);
+    mac.write_reg(sr::CONFIG2, config2.0).await.unwrap();
+
+    // Pin Mux Config 1
+    let led_val = (0b11 << 6) | (0b11 << 4); // | (0b00 << 1);
+    mac.write_cl45(MDIO_PHY_ADDR, RegsC45::DA1E::DIGIO_PINMUX.into(), led_val)
+        .await
+        .unwrap();
+
+    let mut led_pol = LedPolarity(0);
+    led_pol.set_led1_polarity(LedPol::ActiveLow);
+    led_pol.set_led0_polarity(LedPol::ActiveLow);
+
+    // Led Polarity Regisgere Active Low
+    mac.write_cl45(MDIO_PHY_ADDR, RegsC45::DA1E::LED_POLARITY.into(), led_pol.0)
+        .await
+        .unwrap();
+
+    // Led Both On
+    let mut led_cntr = LedCntrl(0x0);
+
+    // LED1: Yellow
+    led_cntr.set_led1_en(true);
+    led_cntr.set_led1_function(LedFunc::TxLevel2P4);
+    // LED0: Green
+    led_cntr.set_led0_en(true);
+    led_cntr.set_led0_function(LedFunc::LinkupTxRxActicity);
+
+    mac.write_cl45(MDIO_PHY_ADDR, RegsC45::DA1E::LED_CNTRL.into(), led_cntr.0)
+        .await
+        .unwrap();
+
+    // Set ADIN1110 Interrupts, RX_READY and LINK_CHANGE
+    // Enable interrupts LINK_CHANGE, TX_RDY, RX_RDY(P1), SPI_ERR
+    // Have to clear the mask the enable it.
+    let mut imask0_val = IMask0(0x0000_1FBF);
+    imask0_val.set_txfcsem(false);
+    imask0_val.set_phyintm(false);
+    imask0_val.set_txboem(false);
+    imask0_val.set_rxboem(false);
+    imask0_val.set_txpem(false);
+
+    mac.write_reg(sr::IMASK0, imask0_val.0).await.unwrap();
+
+    // Set ADIN1110 Interrupts, RX_READY and LINK_CHANGE
+    // Enable interrupts LINK_CHANGE, TX_RDY, RX_RDY(P1), SPI_ERR
+    // Have to clear the mask the enable it.
+    let mut imask1_val = IMask1(0x43FA_1F1A);
+    imask1_val.set_link_change_mask(false);
+    imask1_val.set_p1_rx_rdy_mask(false);
+    imask1_val.set_spi_err_mask(false);
+    imask1_val.set_tx_ecc_err_mask(false);
+    imask1_val.set_rx_ecc_err_mask(false);
+
+    mac.write_reg(sr::IMASK1, imask1_val.0).await.unwrap();
+
+    // Program mac address but also sets mac filters.
+    mac.set_mac_addr(&mac_addr).await.unwrap();
+
+    let (runner, device) = ch::new(
+        &mut state.ch_state,
+        ch::driver::HardwareAddress::Ethernet(mac_addr),
+        MTU,
+    );
+    (
+        device,
+        Runner {
+            ch: runner,
+            mac,
+            int,
+            is_link_up: false,
+            #[cfg(feature = "tc6")]
+            port_link: &state.port_link,
+            _reset: reset,
+        },
+    )
+}
+
+/// Interrupt mask 0 for OPEN Alliance mode: unmask `TXPE`, `TXBOE`, `TXBUE`,
+/// `RXBOE`, `LOFE`, `HDRE`, `RESETC`, `PHYINT`, `TXFCSE` and `CDPE`; everything
+/// else stays masked.
+/// Matches the ADI reference driver (`macInit` + `adin2111_Init`).
+#[cfg(feature = "tc6")]
+const IMASK0_OA: u32 = !0x0000_18FF;
+
+/// Interrupt mask 1 for OPEN Alliance mode: unmask `P1_RX_IFG_ERR`, `SPI_ERR`,
+/// `RX_ECC_ERR` and `TX_ECC_ERR`. Notably `TX_RDY`, `P1_RX_RDY` and `P2_RX_RDY`
+/// stay masked: in OPEN Alliance mode receive availability and transmit credits
+/// are signalled through the data chunk footers instead.
+#[cfg(feature = "tc6")]
+const IMASK1_OA: u32 = !0x0000_1D00;
+
+/// Additionally unmasked in interrupt mask 1 on the ADIN2111: `P2_PHYINT` and `P2_TXFCSE`.
+#[cfg(feature = "tc6")]
+const IMASK1_OA_P2: u32 = 0x0108_0000;
+
+/// Obtain a driver for using the ADIN1110 or ADIN2111 with [`embassy-net`](https://crates.io/crates/embassy-net),
+/// using the OPEN Alliance TC6 SPI protocol (`SPI_CFG0` strapped for OPEN Alliance mode).
+///
+/// On the ADIN1110, [`TxPort::Flood`] transmits on port 1.
+///
+/// # Panics
+/// Panics if `tx_port` is [`TxPort::Port2`] and the chip is an ADIN1110.
+#[cfg(feature = "tc6")]
+#[allow(clippy::too_many_lines)]
+pub async fn new_tc6<const N_RX: usize, const N_TX: usize, SPI: SpiDevice, INT: Wait, RST: OutputPin>(
+    mac_addr: [u8; 6],
+    state: &'_ mut State<N_RX, N_TX>,
+    spi_dev: SPI,
+    int: INT,
+    mut reset: RST,
+    append_fcs_on_tx: bool,
+    tx_port: TxPort,
+) -> (Device<'_>, Runner<'_, Tc6<SPI>, INT, RST>) {
+    info!("INIT ADIN1110/ADIN2111 (OPEN Alliance TC6)");
+
+    // Reset sequence
+    reset.set_low().unwrap();
+
+    // Wait t1: 20-43mS
+    Timer::after_millis(30).await;
+
+    reset.set_high().unwrap();
+
+    // ADIN2111 datasheet: up to 90ms from reset release until the chip is
+    // ready for configuration over SPI.
+    Timer::after_millis(90).await;
+
+    // Create device
+    let mut mac = ADIN1110::new_tc6(spi_dev, append_fcs_on_tx, tx_port);
+
+    // Check PHYID. Right after power-up/reset the MAC-PHY may still answer
+    // with all zeros (which fails the TC6 header echo check), so retry.
+    let mut tries = 0;
+    let port_count = loop {
+        match mac.read_reg(sr::PHYID).await {
+            Ok(PHYID_ADIN1110) => break 1,
+            Ok(PHYID_ADIN2111) => break 2,
+            Ok(id) => debug!("SPE: unexpected CHIP MAC/ID: {:08x}", id),
+            Err(_) => debug!("SPE: chip not responding yet"),
+        }
+        tries += 1;
+        assert!(tries < 100, "ADIN1110/ADIN2111 not responding after reset");
+        Timer::after_millis(2).await;
+    };
+    mac.set_port_count(port_count);
+
+    debug!("SPE: port count: {}", port_count);
+
+    // `CONFIG0.PROTE` is strap-configurable, so read back what the MAC-PHY came
+    // up with and match the control transaction format to it. This read is
+    // still correct in the unprotected format: the protected format only
+    // appends a complement word we have not clocked out yet.
+    let strapped_config0 = Config0(mac.read_reg(sr::CONFIG0).await.unwrap());
+    let protected = strapped_config0.prote();
+    debug!("SPE: control data protection: {}", protected);
+    mac.set_protected(protected);
+
+    #[cfg(any(feature = "defmt", feature = "log"))]
+    {
+        let adin_phy = Phy10BaseT1x::default();
+        let phy_id = adin_phy.get_id(&mut mac).await.unwrap();
+        debug!("SPE: CHIP: PHY ID: {:08x}", phy_id);
+    }
+
+    // Wait for reset-complete, then acknowledge it and clear the status registers.
+    let mut tries = 0;
+    loop {
+        let status0 = Status0(mac.read_reg(sr::STATUS0).await.unwrap());
+        if status0.resetc() {
+            break;
+        }
+        tries += 1;
+        assert!(tries < 100, "reset never completed");
+        Timer::after_millis(1).await;
+    }
+    mac.write_reg(sr::STATUS0, 0x0000_1FFF).await.unwrap();
+    let status1 = mac.read_reg(sr::STATUS1).await.unwrap();
+    mac.write_reg(sr::STATUS1, status1).await.unwrap();
+
+    // Config0: keep the default 64-byte chunk payload size (CPS=6), configure
+    // who appends the FCS on transmit. SYNC is set at the end of init.
+    // PROTE must keep the value it was strapped to, it selects the control
+    // transaction format we are talking to the chip with.
+    let mut config0 = Config0(0x0000_0006);
+    config0.set_txfcsve(append_fcs_on_tx);
+    config0.set_prote(protected);
+    mac.write_reg(sr::CONFIG0, config0.0).await.unwrap();
+
+    // Config2, matching the ADI reference driver: frames with unknown
+    // destination address are forwarded to the host, and on the ADIN2111
+    // there is no cut through between ports.
+    let mut config2 = Config2(0x0000_0800);
+    // crc_append must be disabled if tx_fcs_validation_enable is true!
+    config2.set_crc_append(!append_fcs_on_tx);
+    config2.set_p1_fwd_unk2host(true);
+    if port_count == 2 {
+        config2.set_port_cut_thru_en(false);
+        config2.set_p2_fwd_unk2host(true);
+    }
+    mac.write_reg(sr::CONFIG2, config2.0).await.unwrap();
+
+    if port_count == 2 {
+        // The port 2 PHY comes out of reset after the port 1 PHY; its registers
+        // read as all zeros until then.
+        let mut tries = 0;
+        loop {
+            let crsm_irq_mask = mac
+                .read_cl45(MDIO_PHY_ADDR_PORT2, RegsC45::DA1E::CRSM_IRQ_MASK.into())
+                .await
+                .unwrap();
+            if crsm_irq_mask != 0 {
+                break;
+            }
+            tries += 1;
+            assert!(tries < 100, "ADIN2111 port 2 PHY never came out of reset");
+            Timer::after_millis(1).await;
+        }
+    }
+
+    // The PHYs power up in software power-down (strap dependent); bring them
+    // out of it so autonegotiation and link establishment can start.
+    for phy_addr in [MDIO_PHY_ADDR, MDIO_PHY_ADDR_PORT2].into_iter().take(port_count.into()) {
+        mac.write_cl45(phy_addr, RegsC45::DA1E::CRSM_SFT_PD_CNTRL.into(), 0)
+            .await
+            .unwrap();
+    }
+
+    // Program the mac address and broadcast filters, forwarding matching
+    // frames to the host from every port.
+    let apply_ports = if port_count == 2 {
+        (1 << 30) | (1 << 31)
+    } else {
+        1 << 30
+    };
+    mac.set_mac_addr_filters(&mac_addr, apply_ports).await.unwrap();
+
+    // Interrupt masks for OPEN Alliance mode.
+    let imask1 = if port_count == 2 {
+        IMASK1_OA & !IMASK1_OA_P2
+    } else {
+        IMASK1_OA
+    };
+    mac.write_reg(sr::IMASK0, IMASK0_OA).await.unwrap();
+    mac.write_reg(sr::IMASK1, imask1).await.unwrap();
+
+    // Configuration done: set CONFIG0.SYNC to enable data transactions.
+    config0.set_sync(true);
+    mac.write_reg(sr::CONFIG0, config0.0).await.unwrap();
+
+    let (runner, device) = ch::new(
+        &mut state.ch_state,
+        ch::driver::HardwareAddress::Ethernet(mac_addr),
+        MTU,
+    );
+    (
+        device,
+        Runner {
+            ch: runner,
+            mac,
+            int,
+            is_link_up: false,
+            port_link: &state.port_link,
+            _reset: reset,
+        },
+    )
+}
+
+#[allow(clippy::similar_names)]
+#[cfg(all(test, feature = "generic-spi"))]
+mod tests {
+    use core::convert::Infallible;
+
+    use embedded_hal_1::digital::{ErrorType, OutputPin};
+    use embedded_hal_async::delay::DelayNs;
+    use embedded_hal_bus::spi::ExclusiveDevice;
+    use embedded_hal_mock::common::Generic;
+    use embedded_hal_mock::eh1::spi::{Mock as SpiMock, Transaction as SpiTransaction};
+
+    use crate::crc8::crc8;
+
+    #[derive(Debug, Default)]
+    struct CsPinMock {
+        pub high: u32,
+        pub low: u32,
+    }
+    impl OutputPin for CsPinMock {
+        fn set_low(&mut self) -> Result<(), Self::Error> {
+            self.low += 1;
+            Ok(())
+        }
+
+        fn set_high(&mut self) -> Result<(), Self::Error> {
+            self.high += 1;
+            Ok(())
+        }
+    }
+    impl ErrorType for CsPinMock {
+        type Error = Infallible;
+    }
+
+    use super::*;
+
+    // TODO: This is currently a workaround unit `ExclusiveDevice` is moved to `embedded-hal-bus`
+    // see https://github.com/rust-embedded/embedded-hal/pull/462#issuecomment-1560014426
+    struct MockDelay {}
+
+    impl DelayNs for MockDelay {
+        async fn delay_ns(&mut self, _ns: u32) {
+            todo!()
+        }
+
+        async fn delay_us(&mut self, _us: u32) {
+            todo!()
+        }
+
+        async fn delay_ms(&mut self, _ms: u32) {
+            todo!()
+        }
+    }
+
+    struct TestHarnass {
+        spe: ADIN1110<
+            GenericSpi<ExclusiveDevice<embedded_hal_mock::common::Generic<SpiTransaction<u8>>, CsPinMock, MockDelay>>,
+        >,
+        spi: Generic<SpiTransaction<u8>>,
+    }
+
+    impl TestHarnass {
+        pub fn new(expectations: &[SpiTransaction<u8>], spi_crc: bool, append_fcs_on_tx: bool) -> Self {
+            let cs = CsPinMock::default();
+            let delay = MockDelay {};
+            let spi = SpiMock::new(expectations);
+            let spi_dev: ExclusiveDevice<embedded_hal_mock::common::Generic<SpiTransaction<u8>>, CsPinMock, MockDelay> =
+                ExclusiveDevice::new(spi.clone(), cs, delay);
+            let spe = ADIN1110::new_generic(spi_dev, spi_crc, append_fcs_on_tx);
+
+            Self { spe, spi }
+        }
+
+        pub fn done(&mut self) {
+            self.spi.done();
+        }
+    }
+    #[futures_test::test]
+    async fn mac_read_registers_without_crc() {
+        // Configure expectations
+        let expectations = [
+            // 1st
+            SpiTransaction::write_vec(vec![0x80, 0x01, TURN_AROUND_BYTE]),
+            SpiTransaction::read_vec(vec![0x02, 0x83, 0xBC, 0x91]),
+            SpiTransaction::flush(),
+            // 2nd
+            SpiTransaction::write_vec(vec![0x80, 0x02, TURN_AROUND_BYTE]),
+            SpiTransaction::read_vec(vec![0x00, 0x00, 0x06, 0xC3]),
+            SpiTransaction::flush(),
+        ];
+
+        // Create TestHarnass
+        let mut th = TestHarnass::new(&expectations, false, true);
+
+        // Read PHIID
+        let val = th.spe.read_reg(sr::PHYID).await.expect("Error");
+        assert_eq!(val, 0x0283_BC91);
+
+        // Read CAPAVILITY
+        let val = th.spe.read_reg(sr::CAPABILITY).await.expect("Error");
+        assert_eq!(val, 0x0000_06C3);
+
+        // Mark end of the SPI test.
+        th.done();
+    }
+
+    #[futures_test::test]
+    async fn mac_read_registers_with_crc() {
+        // Configure expectations
+        let expectations = [
+            // 1st
+            SpiTransaction::write_vec(vec![0x80, 0x01, 177, TURN_AROUND_BYTE]),
+            SpiTransaction::read_vec(vec![0x02, 0x83, 0xBC, 0x91, 215]),
+            SpiTransaction::flush(),
+            // 2nd
+            SpiTransaction::write_vec(vec![0x80, 0x02, 184, TURN_AROUND_BYTE]),
+            SpiTransaction::read_vec(vec![0x00, 0x00, 0x06, 0xC3, 57]),
+            SpiTransaction::flush(),
+        ];
+
+        // Create TestHarnass
+        let mut th = TestHarnass::new(&expectations, true, true);
+
+        assert_eq!(crc8(0x0283_BC91_u32.to_be_bytes().as_slice()), 215);
+        assert_eq!(crc8(0x0000_06C3_u32.to_be_bytes().as_slice()), 57);
+
+        // Read PHIID
+        let val = th.spe.read_reg(sr::PHYID).await.expect("Error");
+        assert_eq!(val, 0x0283_BC91);
+
+        // Read CAPAVILITY
+        let val = th.spe.read_reg(sr::CAPABILITY).await.expect("Error");
+        assert_eq!(val, 0x0000_06C3);
+
+        // Mark end of the SPI test.
+        th.done();
+    }
+
+    #[futures_test::test]
+    async fn mac_write_registers_without_crc() {
+        // Configure expectations
+        let expectations = [
+            SpiTransaction::write_vec(vec![0xA0, 0x09, 0x12, 0x34, 0x56, 0x78]),
+            SpiTransaction::flush(),
+        ];
+
+        // Create TestHarnass
+        let mut th = TestHarnass::new(&expectations, false, true);
+
+        // Write reg: 0x1FFF
+        assert!(th.spe.write_reg(sr::STATUS1, 0x1234_5678).await.is_ok());
+
+        // Mark end of the SPI test.
+        th.done();
+    }
+
+    #[futures_test::test]
+    async fn mac_write_registers_with_crc() {
+        // Configure expectations
+        let expectations = [
+            SpiTransaction::write_vec(vec![0xA0, 0x09, 39, 0x12, 0x34, 0x56, 0x78, 28]),
+            SpiTransaction::flush(),
+        ];
+
+        // Create TestHarnass
+        let mut th = TestHarnass::new(&expectations, true, true);
+
+        // Write reg: 0x1FFF
+        assert!(th.spe.write_reg(sr::STATUS1, 0x1234_5678).await.is_ok());
+
+        // Mark end of the SPI test.
+        th.done();
+    }
+
+    #[futures_test::test]
+    async fn write_packet_to_fifo_minimal_with_crc() {
+        // Configure expectations
+        let mut expectations = vec![];
+
+        // Write TX_SIZE reg
+        expectations.push(SpiTransaction::write_vec(vec![160, 48, 136, 0, 0, 0, 66, 201]));
+        expectations.push(SpiTransaction::flush());
+
+        // Write TX reg.
+        // SPI Header + optional CRC + Frame Header
+        expectations.push(SpiTransaction::write_vec(vec![160, 49, 143, 0, 0]));
+        // Packet data
+        let packet = [0xFF_u8; 60];
+        expectations.push(SpiTransaction::write_vec(packet.to_vec()));
+
+        let mut tail = std::vec::Vec::<u8>::with_capacity(100);
+        // Padding
+        if let Some(padding_len) = (ETH_MIN_LEN - FCS_LEN).checked_sub(packet.len()) {
+            tail.resize(padding_len, 0x00);
+        }
+        // Packet FCS + optinal padding
+        tail.extend_from_slice(&[77, 241, 140, 244, DONT_CARE_BYTE, DONT_CARE_BYTE]);
+
+        expectations.push(SpiTransaction::write_vec(tail));
+        expectations.push(SpiTransaction::flush());
+
+        // Create TestHarnass
+        let mut th = TestHarnass::new(&expectations, true, true);
+
+        assert!(th.spe.write_fifo(&packet).await.is_ok());
+
+        // Mark end of the SPI test.
+        th.done();
+    }
+
+    #[futures_test::test]
+    async fn write_packet_to_fifo_minimal_with_crc_without_fcs() {
+        // Configure expectations
+        let mut expectations = vec![];
+
+        // Write TX_SIZE reg
+        expectations.push(SpiTransaction::write_vec(vec![160, 48, 136, 0, 0, 0, 62, 186]));
+        expectations.push(SpiTransaction::flush());
+
+        // Write TX reg.
+        // SPI Header + optional CRC + Frame Header
+        expectations.push(SpiTransaction::write_vec(vec![160, 49, 143, 0, 0]));
+        // Packet data
+        let packet = [0xFF_u8; 60];
+        expectations.push(SpiTransaction::write_vec(packet.to_vec()));
+
+        let mut tail = std::vec::Vec::<u8>::with_capacity(100);
+        // Padding
+        if let Some(padding_len) = (ETH_MIN_LEN - FCS_LEN).checked_sub(packet.len()) {
+            tail.resize(padding_len, 0x00);
+        }
+        // Packet FCS + optinal padding
+        tail.extend_from_slice(&[DONT_CARE_BYTE, DONT_CARE_BYTE]);
+
+        expectations.push(SpiTransaction::write_vec(tail));
+        expectations.push(SpiTransaction::flush());
+
+        // Create TestHarnass
+        let mut th = TestHarnass::new(&expectations, true, false);
+
+        assert!(th.spe.write_fifo(&packet).await.is_ok());
+
+        // Mark end of the SPI test.
+        th.done();
+    }
+
+    #[futures_test::test]
+    async fn write_packet_to_fifo_max_mtu_with_crc() {
+        assert_eq!(MTU, 1514);
+        // Configure expectations
+        let mut expectations = vec![];
+
+        // Write TX_SIZE reg
+        expectations.push(SpiTransaction::write_vec(vec![160, 48, 136, 0, 0, 5, 240, 159]));
+        expectations.push(SpiTransaction::flush());
+
+        // Write TX reg.
+        // SPI Header + optional CRC + Frame Header
+        expectations.push(SpiTransaction::write_vec(vec![160, 49, 143, 0, 0]));
+        // Packet data
+        let packet = [0xAA_u8; MTU];
+        expectations.push(SpiTransaction::write_vec(packet.to_vec()));
+
+        let mut tail = std::vec::Vec::<u8>::with_capacity(100);
+        // Padding
+        if let Some(padding_len) = (ETH_MIN_LEN - FCS_LEN).checked_sub(packet.len()) {
+            tail.resize(padding_len, 0x00);
+        }
+        // Packet FCS + optinal padding
+        tail.extend_from_slice(&[49, 196, 205, 160]);
+
+        expectations.push(SpiTransaction::write_vec(tail));
+        expectations.push(SpiTransaction::flush());
+
+        // Create TestHarnass
+        let mut th = TestHarnass::new(&expectations, true, true);
+
+        assert!(th.spe.write_fifo(&packet).await.is_ok());
+
+        // Mark end of the SPI test.
+        th.done();
+    }
+
+    #[futures_test::test]
+    async fn write_packet_to_fifo_invalid_lengths() {
+        assert_eq!(MTU, 1514);
+
+        // Configure expectations
+        let expectations = vec![];
+
+        // Max packet size = MAX_BUFF - FRAME_HEADER_LEN
+        let packet = [0xAA_u8; MAX_BUFF - FRAME_HEADER_LEN + 1];
+
+        // Create TestHarnass
+        let mut th = TestHarnass::new(&expectations, true, true);
+
+        // minimal
+        assert!(matches!(
+            th.spe.write_fifo(&packet[0..(6 + 6 + 2 - 1)]).await,
+            Err(AdinError::PACKET_TOO_SMALL)
+        ));
+
+        // max + 1
+        assert!(matches!(
+            th.spe.write_fifo(&packet).await,
+            Err(AdinError::PACKET_TOO_BIG)
+        ));
+
+        // Mark end of the SPI test.
+        th.done();
+    }
+
+    #[futures_test::test]
+    async fn write_packet_to_fifo_arp_46bytes_with_crc() {
+        // Configure expectations
+        let mut expectations = vec![];
+
+        // Write TX_SIZE reg
+        expectations.push(SpiTransaction::write_vec(vec![160, 48, 136, 0, 0, 0, 66, 201]));
+        expectations.push(SpiTransaction::flush());
+
+        // Write TX reg.
+        // Header
+        expectations.push(SpiTransaction::write_vec(vec![160, 49, 143, 0, 0]));
+        // Packet data
+        let packet = [
+            34, 51, 68, 85, 102, 119, 18, 52, 86, 120, 154, 188, 8, 6, 0, 1, 8, 0, 6, 4, 0, 2, 18, 52, 86, 120, 154,
+            188, 192, 168, 16, 4, 34, 51, 68, 85, 102, 119, 192, 168, 16, 1,
+        ];
+        expectations.push(SpiTransaction::write_vec(packet.to_vec()));
+
+        let mut tail = std::vec::Vec::<u8>::with_capacity(100);
+        // Padding
+        if let Some(padding_len) = (ETH_MIN_LEN - FCS_LEN).checked_sub(packet.len()) {
+            tail.resize(padding_len, 0x00);
+        }
+        // Packet FCS + optinal padding
+        tail.extend_from_slice(&[147, 149, 213, 68, DONT_CARE_BYTE, DONT_CARE_BYTE]);
+
+        expectations.push(SpiTransaction::write_vec(tail));
+        expectations.push(SpiTransaction::flush());
+
+        // Create TestHarnass
+        let mut th = TestHarnass::new(&expectations, true, true);
+
+        assert!(th.spe.write_fifo(&packet).await.is_ok());
+
+        // Mark end of the SPI test.
+        th.done();
+    }
+
+    #[futures_test::test]
+    async fn write_packet_to_fifo_arp_46bytes_without_crc() {
+        // Configure expectations
+        let mut expectations = vec![];
+
+        // Write TX_SIZE reg
+        expectations.push(SpiTransaction::write_vec(vec![160, 48, 0, 0, 0, 66]));
+        expectations.push(SpiTransaction::flush());
+
+        // Write TX reg.
+        // SPI Header + Frame Header
+        expectations.push(SpiTransaction::write_vec(vec![160, 49, 0, 0]));
+        // Packet data
+        let packet = [
+            34, 51, 68, 85, 102, 119, 18, 52, 86, 120, 154, 188, 8, 6, 0, 1, 8, 0, 6, 4, 0, 2, 18, 52, 86, 120, 154,
+            188, 192, 168, 16, 4, 34, 51, 68, 85, 102, 119, 192, 168, 16, 1,
+        ];
+        expectations.push(SpiTransaction::write_vec(packet.to_vec()));
+
+        let mut tail = std::vec::Vec::<u8>::with_capacity(100);
+        // Padding
+        if let Some(padding_len) = (ETH_MIN_LEN - FCS_LEN).checked_sub(packet.len()) {
+            tail.resize(padding_len, 0x00);
+        }
+        // Packet FCS + optinal padding
+        tail.extend_from_slice(&[147, 149, 213, 68, DONT_CARE_BYTE, DONT_CARE_BYTE]);
+
+        expectations.push(SpiTransaction::write_vec(tail));
+        expectations.push(SpiTransaction::flush());
+
+        // Create TestHarnass
+        let mut th = TestHarnass::new(&expectations, false, true);
+
+        assert!(th.spe.write_fifo(&packet).await.is_ok());
+
+        // Mark end of the SPI test.
+        th.done();
+    }
+
+    #[futures_test::test]
+    async fn read_packet_from_fifo_packet_too_big_for_frame_buffer() {
+        // Configure expectations
+        let mut expectations = vec![];
+
+        // Read RX_SIZE reg
+        let rx_size: u32 = u32::try_from(ETH_MIN_LEN + FRAME_HEADER_LEN + FCS_LEN).unwrap();
+        let mut rx_size_vec = rx_size.to_be_bytes().to_vec();
+        rx_size_vec.push(crc8(&rx_size_vec));
+
+        expectations.push(SpiTransaction::write_vec(vec![128, 144, 79, TURN_AROUND_BYTE]));
+        expectations.push(SpiTransaction::read_vec(rx_size_vec));
+        expectations.push(SpiTransaction::flush());
+
+        let mut frame = [0; MTU];
+
+        // Create TestHarnass
+        let mut th = TestHarnass::new(&expectations, true, true);
+
+        let ret = th.spe.read_fifo(&mut frame[0..ETH_MIN_LEN - 1]).await;
+        assert!(matches!(dbg!(ret), Err(AdinError::PACKET_TOO_BIG)));
+
+        // Mark end of the SPI test.
+        th.done();
+    }
+
+    #[futures_test::test]
+    async fn read_packet_from_fifo_packet_too_small() {
+        // Configure expectations
+        let mut expectations = vec![];
+
+        // This value is importen for this test!
+        assert_eq!(ETH_MIN_LEN, 64);
+
+        // Packet data, size = `ETH_MIN_LEN` - `FCS_LEN` - 1
+        let packet = [0; 64 - FCS_LEN - 1];
+
+        // Read RX_SIZE reg
+        let rx_size: u32 = u32::try_from(packet.len() + FRAME_HEADER_LEN + FCS_LEN).unwrap();
+        let mut rx_size_vec = rx_size.to_be_bytes().to_vec();
+        rx_size_vec.push(crc8(&rx_size_vec));
+
+        expectations.push(SpiTransaction::write_vec(vec![128, 144, 79, TURN_AROUND_BYTE]));
+        expectations.push(SpiTransaction::read_vec(rx_size_vec));
+        expectations.push(SpiTransaction::flush());
+
+        let mut frame = [0; MTU];
+
+        // Create TestHarnass
+        let mut th = TestHarnass::new(&expectations, true, true);
+
+        let ret = th.spe.read_fifo(&mut frame).await;
+        assert!(matches!(dbg!(ret), Err(AdinError::PACKET_TOO_SMALL)));
+
+        // Mark end of the SPI test.
+        th.done();
+    }
+
+    #[futures_test::test]
+    async fn read_packet_from_fifo_packet_corrupted_fcs() {
+        let mut frame = [0; MTU];
+        // Configure expectations
+        let mut expectations = vec![];
+
+        let packet = [0xDE; 60];
+        let crc_en = true;
+
+        // Read RX_SIZE reg
+        let rx_size: u32 = u32::try_from(packet.len() + FRAME_HEADER_LEN + FCS_LEN).unwrap();
+        let mut rx_size_vec = rx_size.to_be_bytes().to_vec();
+        if crc_en {
+            rx_size_vec.push(crc8(&rx_size_vec));
+        }
+
+        // SPI Header with CRC
+        let mut rx_fsize = vec![128, 144, 79, TURN_AROUND_BYTE];
+        if !crc_en {
+            // remove the CRC on idx 2
+            rx_fsize.swap_remove(2);
+        }
+        expectations.push(SpiTransaction::write_vec(rx_fsize));
+        expectations.push(SpiTransaction::read_vec(rx_size_vec));
+        expectations.push(SpiTransaction::flush());
+
+        // Read RX reg, SPI Header with CRC
+        let mut rx_reg = vec![128, 145, 72, TURN_AROUND_BYTE];
+        if !crc_en {
+            // remove the CRC on idx 2
+            rx_reg.swap_remove(2);
+        }
+        expectations.push(SpiTransaction::write_vec(rx_reg));
+        // Frame Header
+        expectations.push(SpiTransaction::read_vec(vec![0, 0]));
+        // Packet data
+        expectations.push(SpiTransaction::read_vec(packet.to_vec()));
+
+        let packet_crc = ETH_FCS::new(&packet);
+
+        let mut tail = std::vec::Vec::<u8>::with_capacity(100);
+
+        tail.extend_from_slice(&packet_crc.hton_bytes());
+        // increase last byte with 1.
+        if let Some(crc) = tail.last_mut() {
+            *crc = crc.wrapping_add(1);
+        }
+
+        // Need extra bytes?
+        let pad = (packet.len() + FCS_LEN + FRAME_HEADER_LEN) & 0x03;
+        if pad != 0 {
+            // Packet FCS + optinal padding
+            tail.resize(tail.len() + pad, DONT_CARE_BYTE);
+        }
+
+        expectations.push(SpiTransaction::read_vec(tail));
+        expectations.push(SpiTransaction::flush());
+
+        // Create TestHarnass
+        let mut th = TestHarnass::new(&expectations, crc_en, false);
+
+        let ret = th.spe.read_fifo(&mut frame).await.expect_err("Error!");
+        assert!(matches!(ret, AdinError::FCS));
+
+        // Mark end of the SPI test.
+        th.done();
+    }
+
+    #[futures_test::test]
+    async fn read_packet_to_fifo_check_spi_read_multipule_of_u32_valid_lengths() {
+        let packet_buffer = [0; MTU];
+        let mut frame = [0; MTU];
+        let mut expectations = std::vec::Vec::with_capacity(16);
+
+        // Packet data, size = `ETH_MIN_LEN` - `FCS_LEN`
+        for packet_size in [60, 61, 62, 63, 64, MTU - 4, MTU - 3, MTU - 2, MTU - 1, MTU] {
+            for crc_en in [false, true] {
+                expectations.clear();
+
+                let packet = &packet_buffer[0..packet_size];
+
+                // Read RX_SIZE reg
+                let rx_size: u32 = u32::try_from(packet.len() + FRAME_HEADER_LEN + FCS_LEN).unwrap();
+                let mut rx_size_vec = rx_size.to_be_bytes().to_vec();
+                if crc_en {
+                    rx_size_vec.push(crc8(&rx_size_vec));
+                }
+
+                // SPI Header with CRC
+                let mut rx_fsize = vec![128, 144, 79, TURN_AROUND_BYTE];
+                if !crc_en {
+                    // remove the CRC on idx 2
+                    rx_fsize.swap_remove(2);
+                }
+                expectations.push(SpiTransaction::write_vec(rx_fsize));
+                expectations.push(SpiTransaction::read_vec(rx_size_vec));
+                expectations.push(SpiTransaction::flush());
+
+                // Read RX reg, SPI Header with CRC
+                let mut rx_reg = vec![128, 145, 72, TURN_AROUND_BYTE];
+                if !crc_en {
+                    // remove the CRC on idx 2
+                    rx_reg.swap_remove(2);
+                }
+                expectations.push(SpiTransaction::write_vec(rx_reg));
+                // Frame Header
+                expectations.push(SpiTransaction::read_vec(vec![0, 0]));
+                // Packet data
+                expectations.push(SpiTransaction::read_vec(packet.to_vec()));
+
+                let packet_crc = ETH_FCS::new(packet);
+
+                let mut tail = std::vec::Vec::<u8>::with_capacity(100);
+
+                tail.extend_from_slice(&packet_crc.hton_bytes());
+
+                // Need extra bytes?
+                let pad = (packet_size + FCS_LEN + FRAME_HEADER_LEN) & 0x03;
+                if pad != 0 {
+                    // Packet FCS + optinal padding
+                    tail.resize(tail.len() + pad, DONT_CARE_BYTE);
+                }
+
+                expectations.push(SpiTransaction::read_vec(tail));
+                expectations.push(SpiTransaction::flush());
+
+                // Create TestHarnass
+                let mut th = TestHarnass::new(&expectations, crc_en, false);
+
+                let ret = th.spe.read_fifo(&mut frame).await.expect("Error!");
+                assert_eq!(ret, packet_size);
+
+                // Mark end of the SPI test.
+                th.done();
+            }
+        }
+    }
+
+    #[futures_test::test]
+    async fn spi_crc_error() {
+        // Configure expectations
+        let expectations = vec![
+            SpiTransaction::write_vec(vec![128, 144, 79, TURN_AROUND_BYTE]),
+            SpiTransaction::read_vec(vec![0x00, 0x00, 0x00, 0x00, 0xDD]),
+            SpiTransaction::flush(),
+        ];
+
+        // Create TestHarnass
+        let mut th = TestHarnass::new(&expectations, true, false);
+
+        let ret = th.spe.read_reg(sr::RX_FSIZE).await;
+        assert!(matches!(dbg!(ret), Err(AdinError::SPI_CRC)));
+
+        // Mark end of the SPI test.
+        th.done();
+    }
+}

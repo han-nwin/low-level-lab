@@ -1,0 +1,53 @@
+#![no_std]
+#![no_main]
+
+use defmt::*;
+use defmt_rtt as _;
+use embassy_executor::Spawner;
+use embassy_stm32::adc::{Adc, AdcChannel as _, Clock, Config, Prescaler, SampleTime};
+use embassy_stm32::{bind_interrupts, dma, peripherals};
+use embassy_time::Timer;
+use panic_probe as _;
+
+static mut DMA_BUF: [u16; 2] = [0; 2];
+
+bind_interrupts!(struct Irqs {
+    DMA1_CHANNEL1 => dma::InterruptHandler<peripherals::DMA1_CH1>;
+});
+
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let mut read_buffer = unsafe { &mut DMA_BUF[..] };
+
+    let mut p = embassy_stm32::init(Default::default());
+
+    info!("Hello World!");
+
+    let mut config = Config::default();
+    config.clock = Clock::Async(Prescaler::Div1);
+    let mut adc = Adc::new_blocking(p.ADC1, config);
+
+    let mut dma = p.DMA1_CH1;
+    let mut vrefint = adc.enable_vrefint();
+
+    loop {
+        adc.read_sequence(
+            dma.reborrow(),
+            Irqs,
+            [
+                (vrefint.reborrow_adc(), SampleTime::Cycles1605),
+                (p.PA0.reborrow_adc(), SampleTime::Cycles1605),
+            ]
+            .into_iter(),
+            None,
+            &mut read_buffer,
+        )
+        .await;
+
+        let vrefint = read_buffer[0];
+        let measured = read_buffer[1];
+        info!("vrefint: {}", vrefint);
+        info!("measured: {}", measured);
+        Timer::after_millis(500).await;
+    }
+}

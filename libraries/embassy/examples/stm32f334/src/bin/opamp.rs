@@ -1,0 +1,64 @@
+#![no_std]
+#![no_main]
+
+use defmt::info;
+use defmt_rtt as _;
+use embassy_executor::Spawner;
+use embassy_stm32::adc::{Adc, SampleTime};
+use embassy_stm32::opamp::OpAmp;
+use embassy_stm32::peripherals::ADC2;
+use embassy_stm32::time::mhz;
+use embassy_stm32::{Config, adc, bind_interrupts};
+use embassy_time::Timer;
+use panic_probe as _;
+
+bind_interrupts!(struct Irqs {
+    ADC1_2 => adc::InterruptHandler<ADC2>;
+});
+
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) -> ! {
+    let mut config = Config::default();
+    {
+        use embassy_stm32::rcc::*;
+        config.rcc.hse = Some(Hse {
+            freq: mhz(8),
+            mode: HseMode::Bypass,
+        });
+        config.rcc.pll = Some(Pll {
+            src: PllSource::HSE,
+            prediv: PllPreDiv::Div1,
+            mul: PllMul::Mul9,
+        });
+        config.rcc.sys = Sysclk::Pll1P;
+        config.rcc.ahb_pre = AHBPrescaler::Div1;
+        config.rcc.apb1_pre = APBPrescaler::Div2;
+        config.rcc.apb2_pre = APBPrescaler::Div1;
+        config.rcc.adc = AdcClockSource::Pll(AdcPllPrescaler::Div1);
+    }
+    let mut p = embassy_stm32::init(config);
+
+    info!("create adc...");
+
+    let mut adc = Adc::new(p.ADC2, Irqs, adc::Config::default());
+    let mut opamp = OpAmp::new(p.OPAMP2);
+
+    info!("enable vrefint...");
+
+    // Only ADC1 has the temperature sensor and VBAT channels on the F3; ADC2 only has VREFINT.
+    let mut vrefint = adc.enable_vrefint();
+    let mut buffer = opamp.buffer_ext(p.PA7.reborrow(), p.PA6.reborrow());
+
+    loop {
+        let vref = adc.read(&mut vrefint, SampleTime::Cycles6015).await;
+        info!("read vref: {} (should be {})", vref, vrefint.calibrated_value());
+
+        let buffer = adc.read(&mut buffer, SampleTime::Cycles6015).await;
+        info!("read buffer: {}", buffer);
+
+        let pin_mv = (buffer as u32 * vrefint.calibrated_value() as u32 / vref as u32) * 3300 / 4095;
+        info!("computed pin mv: {}", pin_mv);
+
+        Timer::after_millis(500).await;
+    }
+}

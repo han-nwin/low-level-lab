@@ -1,0 +1,137 @@
+#![no_std]
+#![no_main]
+
+use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+use defmt::*;
+use defmt_rtt as _;
+use embassy_executor::Spawner;
+use embassy_net::StackStorage;
+use embassy_net::tcp::client::{TcpClient, TcpClientState};
+use embassy_stm32::eth::{Ethernet, GenericPhy, PacketQueue, Sma};
+use embassy_stm32::peripherals::{ETH, ETH_SMA};
+use embassy_stm32::rng::Rng;
+use embassy_stm32::{Config, bind_interrupts, eth, peripherals, rng};
+use embassy_time::Timer;
+use embedded_io_async::Write;
+use embedded_nal_async::TcpConnect;
+use panic_probe as _;
+use static_cell::StaticCell;
+
+bind_interrupts!(struct Irqs {
+    ETH => eth::InterruptHandler<ETH>;
+    RNG => rng::InterruptHandler<peripherals::RNG>;
+});
+
+type Device = Ethernet<'static, ETH, GenericPhy<Sma<'static, ETH_SMA>>>;
+
+#[embassy_executor::task]
+async fn net_task(mut runner: embassy_net::Runner<'static>) -> ! {
+    runner.run().await
+}
+
+#[embassy_executor::main]
+async fn main(spawner: Spawner) -> ! {
+    let mut config = Config::default();
+    {
+        use embassy_stm32::rcc::*;
+        config.rcc.hsi = Some(HSIPrescaler::Div1);
+        config.rcc.csi = true;
+        config.rcc.hsi48 = Some(Default::default()); // needed for RNG
+        config.rcc.pll1 = Some(Pll {
+            source: PllSource::Hsi,
+            prediv: PllPreDiv::Div4,
+            mul: PllMul::Mul50,
+            fracn: None,
+            divp: Some(PllDiv::Div2),
+            divq: None,
+            divr: None,
+        });
+        config.rcc.sys = Sysclk::Pll1P; // 400 Mhz
+        config.rcc.ahb_pre = AHBPrescaler::Div2; // 200 Mhz
+        config.rcc.apb1_pre = APBPrescaler::Div2; // 100 Mhz
+        config.rcc.apb2_pre = APBPrescaler::Div2; // 100 Mhz
+        config.rcc.apb3_pre = APBPrescaler::Div2; // 100 Mhz
+        config.rcc.apb4_pre = APBPrescaler::Div2; // 100 Mhz
+        config.rcc.voltage_scale = VoltageScale::Scale1;
+    }
+    let p = embassy_stm32::init(config);
+    info!("Hello World!");
+
+    // Generate random seed.
+    let mut rng = Rng::new(p.RNG, Irqs);
+    let mut seed = [0; 8];
+    rng.blocking_fill_bytes(&mut seed);
+    let seed = u64::from_le_bytes(seed);
+
+    let mac_addr = [0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
+
+    static PACKETS: StaticCell<PacketQueue<4, 4>> = StaticCell::new();
+
+    let device = Ethernet::new_mii(
+        PACKETS.init(PacketQueue::<4, 4>::new()),
+        p.ETH,
+        p.PA1,
+        p.PC3,
+        p.PA7,
+        p.PC4,
+        p.PC5,
+        p.PB0,
+        p.PB1,
+        p.PG13,
+        p.PG12,
+        p.PC2,
+        p.PE2,
+        p.PG11,
+        mac_addr,
+        p.ETH_SMA,
+        p.PA2,
+        p.PC1,
+        Irqs,
+    );
+    info!("Device created");
+
+    // Init network stack
+    static STACK: StaticCell<StackStorage> = StaticCell::new();
+    let (stack, runner) = embassy_net::Stack::new(STACK.init(StackStorage::new()), seed);
+
+    // Add the network interface to the stack.
+    static DEVICE: StaticCell<Device> = StaticCell::new();
+    let iface = unwrap!(stack.add_iface_borrowed(DEVICE.init(device)));
+    unwrap!(iface.set_dhcpv4(Some(Default::default())));
+
+    // Launch network task
+    spawner.spawn(unwrap!(net_task(runner)));
+
+    // Ensure DHCP configuration is up before trying connect
+    iface.wait_config_up().await;
+
+    info!("Network task initialized");
+
+    static STATE: StaticCell<TcpClientState<1, 1024, 1024>> = StaticCell::new();
+    let state = STATE.init(TcpClientState::new());
+    let client = TcpClient::new(stack, state);
+
+    loop {
+        // You need to start a server on the host machine, for example: `nc -l 8000`
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 100, 1), 8000));
+
+        info!("connecting...");
+        let r = client.connect(addr).await;
+        if let Err(e) = r {
+            info!("connect error: {:?}", e);
+            Timer::after_secs(1).await;
+            continue;
+        }
+        let mut connection = r.unwrap();
+        info!("connected!");
+        loop {
+            let r = connection.write_all(b"Hello\n").await;
+            if let Err(e) = r {
+                info!("write error: {:?}", e);
+                break;
+            }
+            Timer::after_secs(1).await;
+        }
+    }
+}

@@ -1,0 +1,1065 @@
+use core::marker::PhantomData;
+
+use embassy_hal_internal::PeripheralType;
+use embassy_usb_driver::{EndpointAddress, EndpointAllocError, EndpointType, Event, Unsupported};
+pub use embassy_usb_synopsys_otg::Config;
+use embassy_usb_synopsys_otg::otg_v1::Otg;
+use embassy_usb_synopsys_otg::otg_v1::vals::Dspd;
+use embassy_usb_synopsys_otg::{
+    Bus as OtgBus, ControlPipe, Driver as OtgDriver, Endpoint, In, OtgInstance, Out, PhyType, State,
+    on_interrupt as on_interrupt_impl,
+};
+
+use crate::gpio::{AfType, OutputType, Speed};
+use crate::interrupt::typelevel::Interrupt;
+use crate::rcc::{self, RccPeripheral};
+use crate::{Peri, interrupt};
+
+/// Interrupt handler.
+pub struct InterruptHandler<T: Instance> {
+    _marker: PhantomData<T>,
+}
+
+impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandler<T> {
+    unsafe fn on_interrupt() {
+        let r = T::regs();
+        on_interrupt_impl(r, &T::state());
+    }
+}
+
+macro_rules! config_ulpi_pins {
+    ($($pin:ident),*) => {
+                critical_section::with(|_| {
+            $(
+                set_as_af!($pin, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+            )*
+        })
+    };
+}
+
+// From `synopsys-usb-otg` crate:
+// This calculation doesn't correspond to one in a Reference Manual.
+// In fact, the required number of words is higher than indicated in RM.
+// The following numbers are pessimistic and were figured out empirically.
+const RX_FIFO_EXTRA_SIZE_WORDS: u16 = 30;
+
+/// USB driver.
+pub struct Driver<'d, T: Instance> {
+    phantom: PhantomData<&'d mut T>,
+    inner: OtgDriver<'d>,
+}
+
+impl<'d, T: Instance> Driver<'d, T> {
+    /// Initializes USB OTG peripheral with internal Full-Speed PHY.
+    ///
+    /// # Arguments
+    ///
+    /// * `ep_out_buffer` - An internal buffer used to temporarily store received packets.
+    /// Must be large enough to fit all OUT endpoint max packet sizes.
+    /// Endpoint allocation will fail if it is too small.
+    pub fn new_fs(
+        _peri: Peri<'d, T>,
+        dp: Peri<'d, impl DpPin<T>>,
+        dm: Peri<'d, impl DmPin<T>>,
+        _irq: impl interrupt::typelevel::Binding<T::Interrupt, InterruptHandler<T>> + 'd,
+        ep_out_buffer: &'d mut [u8],
+        config: Config,
+    ) -> Self {
+        #[cfg(usb_alternate_function)]
+        {
+            set_as_af!(dp, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+            set_as_af!(dm, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+        }
+        #[cfg(not(usb_alternate_function))]
+        let _ = (dp, dm);
+
+        let regs = T::regs();
+
+        let instance = OtgInstance {
+            regs,
+            state: T::state(),
+            fifo_depth_words: T::FIFO_DEPTH_WORDS,
+            tx_fifo_count: T::state().endpoint_count() as u8,
+            extra_rx_fifo_words: RX_FIFO_EXTRA_SIZE_WORDS,
+            phy_type: PhyType::InternalFullSpeed,
+            calculate_trdt_fn: calculate_trdt::<T>,
+        };
+
+        Self {
+            inner: OtgDriver::new(ep_out_buffer, instance, config),
+            phantom: PhantomData,
+        }
+    }
+
+    /// Initializes USB OTG peripheral with internal High-Speed PHY.
+    ///
+    /// # Arguments
+    ///
+    /// * `ep_out_buffer` - An internal buffer used to temporarily store received packets.
+    /// Must be large enough to fit all OUT endpoint max packet sizes.
+    /// Endpoint allocation will fail if it is too small.
+    pub fn new_hs(
+        _peri: Peri<'d, T>,
+        dp: Peri<'d, impl DpPin<T>>,
+        dm: Peri<'d, impl DmPin<T>>,
+        _irq: impl interrupt::typelevel::Binding<T::Interrupt, InterruptHandler<T>> + 'd,
+        ep_out_buffer: &'d mut [u8],
+        config: Config,
+    ) -> Self {
+        #[cfg(usb_alternate_function)]
+        {
+            set_as_af!(dp, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+            set_as_af!(dm, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+        }
+        #[cfg(not(usb_alternate_function))]
+        let _ = (dp, dm);
+
+        let instance = OtgInstance {
+            regs: T::regs(),
+            state: T::state(),
+            fifo_depth_words: T::FIFO_DEPTH_WORDS,
+            tx_fifo_count: T::state().endpoint_count() as u8,
+            extra_rx_fifo_words: RX_FIFO_EXTRA_SIZE_WORDS,
+            phy_type: PhyType::InternalHighSpeed,
+            calculate_trdt_fn: calculate_trdt::<T>,
+        };
+
+        Self {
+            inner: OtgDriver::new(ep_out_buffer, instance, config),
+            phantom: PhantomData,
+        }
+    }
+
+    /// Initializes USB OTG peripheral with internal High-Speed PHY, on chips where that PHY
+    /// drives dedicated package pins instead of GPIO alternate functions.
+    ///
+    /// On the STM32N6 the integrated UTMI+ PHY is wired to the `OTGx_HSDP` / `OTGx_HSDM`
+    /// balls (RM0486 Rev 4, Figure 982, p. 3763), which are not GPIOs and therefore have no
+    /// [`DpPin`] / [`DmPin`] implementations — there is nothing to hand over here.
+    /// For chips whose internal High-Speed PHY *is* reached through GPIO alternate functions
+    /// (STM32U5, STM32H7RS, ...), use [`Driver::new_hs`] and pass the two pins.
+    ///
+    /// # Arguments
+    ///
+    /// * `ep_out_buffer` - An internal buffer used to temporarily store received packets.
+    /// Must be large enough to fit all OUT endpoint max packet sizes.
+    /// Endpoint allocation will fail if it is too small.
+    pub fn new_hs_dedicated_pins(
+        _peri: Peri<'d, T>,
+        _irq: impl interrupt::typelevel::Binding<T::Interrupt, InterruptHandler<T>> + 'd,
+        ep_out_buffer: &'d mut [u8],
+        config: Config,
+    ) -> Self {
+        assert!(T::HIGH_SPEED, "Peripheral is not capable of high-speed USB");
+
+        let instance = OtgInstance {
+            regs: T::regs(),
+            state: T::state(),
+            fifo_depth_words: T::FIFO_DEPTH_WORDS,
+            tx_fifo_count: T::state().endpoint_count() as u8,
+            extra_rx_fifo_words: RX_FIFO_EXTRA_SIZE_WORDS,
+            phy_type: PhyType::InternalHighSpeed,
+            calculate_trdt_fn: calculate_trdt::<T>,
+        };
+
+        Self {
+            inner: OtgDriver::new(ep_out_buffer, instance, config),
+            phantom: PhantomData,
+        }
+    }
+
+    /// Initializes USB OTG peripheral with external Full-speed PHY (usually, a High-speed PHY in Full-speed mode).
+    ///
+    /// # Arguments
+    ///
+    /// * `ep_out_buffer` - An internal buffer used to temporarily store received packets.
+    /// Must be large enough to fit all OUT endpoint max packet sizes.
+    /// Endpoint allocation will fail if it is too small.
+    pub fn new_fs_ulpi(
+        _peri: Peri<'d, T>,
+        ulpi_clk: Peri<'d, impl UlpiClkPin<T>>,
+        ulpi_dir: Peri<'d, impl UlpiDirPin<T>>,
+        ulpi_nxt: Peri<'d, impl UlpiNxtPin<T>>,
+        ulpi_stp: Peri<'d, impl UlpiStpPin<T>>,
+        ulpi_d0: Peri<'d, impl UlpiD0Pin<T>>,
+        ulpi_d1: Peri<'d, impl UlpiD1Pin<T>>,
+        ulpi_d2: Peri<'d, impl UlpiD2Pin<T>>,
+        ulpi_d3: Peri<'d, impl UlpiD3Pin<T>>,
+        ulpi_d4: Peri<'d, impl UlpiD4Pin<T>>,
+        ulpi_d5: Peri<'d, impl UlpiD5Pin<T>>,
+        ulpi_d6: Peri<'d, impl UlpiD6Pin<T>>,
+        ulpi_d7: Peri<'d, impl UlpiD7Pin<T>>,
+        _irq: impl interrupt::typelevel::Binding<T::Interrupt, InterruptHandler<T>> + 'd,
+        ep_out_buffer: &'d mut [u8],
+        config: Config,
+    ) -> Self {
+        config_ulpi_pins!(
+            ulpi_clk, ulpi_dir, ulpi_nxt, ulpi_stp, ulpi_d0, ulpi_d1, ulpi_d2, ulpi_d3, ulpi_d4, ulpi_d5, ulpi_d6,
+            ulpi_d7
+        );
+
+        let instance = OtgInstance {
+            regs: T::regs(),
+            state: T::state(),
+            fifo_depth_words: T::FIFO_DEPTH_WORDS,
+            tx_fifo_count: T::state().endpoint_count() as u8,
+            extra_rx_fifo_words: RX_FIFO_EXTRA_SIZE_WORDS,
+            phy_type: PhyType::ExternalFullSpeed,
+            calculate_trdt_fn: calculate_trdt::<T>,
+        };
+
+        Self {
+            inner: OtgDriver::new(ep_out_buffer, instance, config),
+            phantom: PhantomData,
+        }
+    }
+
+    /// Initializes USB OTG peripheral with external High-Speed PHY.
+    ///
+    /// # Arguments
+    ///
+    /// * `ep_out_buffer` - An internal buffer used to temporarily store received packets.
+    /// Must be large enough to fit all OUT endpoint max packet sizes.
+    /// Endpoint allocation will fail if it is too small.
+    pub fn new_hs_ulpi(
+        _peri: Peri<'d, T>,
+        ulpi_clk: Peri<'d, impl UlpiClkPin<T>>,
+        ulpi_dir: Peri<'d, impl UlpiDirPin<T>>,
+        ulpi_nxt: Peri<'d, impl UlpiNxtPin<T>>,
+        ulpi_stp: Peri<'d, impl UlpiStpPin<T>>,
+        ulpi_d0: Peri<'d, impl UlpiD0Pin<T>>,
+        ulpi_d1: Peri<'d, impl UlpiD1Pin<T>>,
+        ulpi_d2: Peri<'d, impl UlpiD2Pin<T>>,
+        ulpi_d3: Peri<'d, impl UlpiD3Pin<T>>,
+        ulpi_d4: Peri<'d, impl UlpiD4Pin<T>>,
+        ulpi_d5: Peri<'d, impl UlpiD5Pin<T>>,
+        ulpi_d6: Peri<'d, impl UlpiD6Pin<T>>,
+        ulpi_d7: Peri<'d, impl UlpiD7Pin<T>>,
+        _irq: impl interrupt::typelevel::Binding<T::Interrupt, InterruptHandler<T>> + 'd,
+        ep_out_buffer: &'d mut [u8],
+        config: Config,
+    ) -> Self {
+        assert!(T::HIGH_SPEED == true, "Peripheral is not capable of high-speed USB");
+
+        config_ulpi_pins!(
+            ulpi_clk, ulpi_dir, ulpi_nxt, ulpi_stp, ulpi_d0, ulpi_d1, ulpi_d2, ulpi_d3, ulpi_d4, ulpi_d5, ulpi_d6,
+            ulpi_d7
+        );
+
+        let instance = OtgInstance {
+            regs: T::regs(),
+            state: T::state(),
+            fifo_depth_words: T::FIFO_DEPTH_WORDS,
+            tx_fifo_count: T::state().endpoint_count() as u8,
+            extra_rx_fifo_words: RX_FIFO_EXTRA_SIZE_WORDS,
+            phy_type: PhyType::ExternalHighSpeed,
+            calculate_trdt_fn: calculate_trdt::<T>,
+        };
+
+        Self {
+            inner: OtgDriver::new(ep_out_buffer, instance, config),
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<'d, T: Instance> embassy_usb_driver::Driver<'d> for Driver<'d, T> {
+    type EndpointOut = Endpoint<'d, Out>;
+    type EndpointIn = Endpoint<'d, In>;
+    type ControlPipe = ControlPipe<'d>;
+    type Bus = Bus<'d, T>;
+
+    fn alloc_endpoint_in(
+        &mut self,
+        ep_type: EndpointType,
+        ep_addr: Option<EndpointAddress>,
+        max_packet_size: u16,
+        interval_ms: u8,
+    ) -> Result<Self::EndpointIn, EndpointAllocError> {
+        self.inner
+            .alloc_endpoint_in(ep_type, ep_addr, max_packet_size, interval_ms)
+    }
+
+    fn alloc_endpoint_out(
+        &mut self,
+        ep_type: EndpointType,
+        ep_addr: Option<EndpointAddress>,
+        max_packet_size: u16,
+        interval_ms: u8,
+    ) -> Result<Self::EndpointOut, EndpointAllocError> {
+        self.inner
+            .alloc_endpoint_out(ep_type, ep_addr, max_packet_size, interval_ms)
+    }
+
+    fn start(self, control_max_packet_size: u16) -> (Self::Bus, Self::ControlPipe) {
+        let (bus, cp) = self.inner.start(control_max_packet_size);
+
+        (
+            Bus {
+                phantom: PhantomData,
+                inner: bus,
+                inited: false,
+            },
+            cp,
+        )
+    }
+}
+
+/// USB bus.
+pub struct Bus<'d, T: Instance> {
+    phantom: PhantomData<&'d mut T>,
+    inner: OtgBus<'d>,
+    inited: bool,
+}
+
+impl<'d, T: Instance> Bus<'d, T> {
+    fn init(&mut self) {
+        super::common_init::<T>();
+
+        // Enable ULPI clock if external PHY is used
+        let phy_type = self.inner.phy_type();
+        let _ulpien = !phy_type.internal();
+
+        #[cfg(any(stm32f2, stm32f4, stm32f7))]
+        if T::HIGH_SPEED {
+            critical_section::with(|_| {
+                let rcc = crate::pac::RCC;
+                rcc.ahb1enr().modify(|w| w.set_usb_otg_hsulpien(_ulpien));
+                rcc.ahb1lpenr().modify(|w| w.set_usb_otg_hsulpilpen(_ulpien));
+            });
+        }
+
+        #[cfg(stm32h7)]
+        critical_section::with(|_| {
+            let rcc = crate::pac::RCC;
+            if T::HIGH_SPEED {
+                rcc.ahb1enr().modify(|w| w.set_usb_otg_hs_ulpien(_ulpien));
+                rcc.ahb1lpenr().modify(|w| w.set_usb_otg_hs_ulpilpen(_ulpien));
+            } else {
+                rcc.ahb1enr().modify(|w| w.set_usb_otg_fs_ulpien(_ulpien));
+                rcc.ahb1lpenr().modify(|w| w.set_usb_otg_fs_ulpilpen(_ulpien));
+            }
+        });
+
+        #[cfg(stm32h7rs)]
+        critical_section::with(|_| {
+            let rcc = crate::pac::RCC;
+            rcc.ahb1enr().modify(|w| {
+                w.set_usbphycen(true);
+                w.set_usb_otg_hsen(true);
+            });
+            rcc.ahb1lpenr().modify(|w| {
+                w.set_usbphyclpen(true);
+                w.set_usb_otg_hslpen(true);
+            });
+        });
+
+        #[cfg(all(stm32u5, peri_usb_otg_hs))]
+        {
+            critical_section::with(|_| {
+                crate::pac::RCC.ahb2enr1().modify(|w| {
+                    w.set_usb_otg_hsen(true);
+                    w.set_usb_otg_hs_phyen(true);
+                });
+            });
+
+            crate::pac::SYSCFG.otghsphycr().modify(|w| {
+                w.set_en(true);
+            });
+        }
+
+        #[cfg(all(stm32wba, peri_usb_otg_hs))]
+        {
+            critical_section::with(|_| {
+                crate::pac::RCC.ahb2enr().modify(|w| {
+                    w.set_usb_otg_hsen(true);
+                    w.set_usb_otg_hs_phyen(true);
+                });
+            });
+
+            crate::pac::SYSCFG.otghsphytuner2().modify(|w| {
+                w.set_compdistune(0b010);
+                w.set_sqrxtune(0b000);
+            });
+
+            crate::pac::SYSCFG.otghsphycr().modify(|w| {
+                w.set_en(true);
+            });
+        }
+
+        let r = T::regs();
+        let core_id = r.cid().read().0;
+        trace!("Core id {:08x}", core_id);
+
+        // Wait for AHB ready.
+        while !r.grstctl().read().ahbidl() {}
+
+        // Configure as device.
+        self.inner.configure_as_device();
+
+        // Configuring Vbus sense and SOF output
+        match core_id {
+            0x0000_1200 | 0x0000_1100 | 0x0000_1000 => self.inner.config_v1(),
+            0x0000_2000 | 0x0000_2100 | 0x0000_2300 | 0x0000_3000 | 0x0000_3100 => self.inner.config_v2v3(),
+            0x0000_5000 | 0x0000_6100 => self.inner.config_v5(),
+            _ => unimplemented!("Unknown USB core id {:X}", core_id),
+        }
+    }
+
+    fn disable(&mut self) {
+        if !self.inited {
+            return;
+        }
+
+        T::Interrupt::disable();
+
+        #[cfg(all(stm32wba, peri_usb_otg_hs))]
+        {
+            debug!("disabling OTG clocks");
+            crate::pac::SYSCFG.otghsphycr().modify(|w| w.set_en(false));
+            critical_section::with(|_| {
+                crate::pac::RCC.ahb2enr().modify(|w| w.set_usb_otg_hs_phyen(false));
+                crate::pac::PWR.vosr().modify(|w| {
+                    w.set_usbboosten(false);
+                    w.set_usbpwren(false);
+                    w.set_vdd11usbdis(true);
+                });
+            });
+        }
+
+        rcc::disable::<T>();
+        self.inited = false;
+
+        #[cfg(stm32l4)]
+        crate::pac::PWR.cr2().modify(|w| w.set_usv(false));
+        // Cannot disable PWR, because other peripherals might be using it
+    }
+}
+
+impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
+    async fn poll(&mut self) -> Event {
+        if !self.inited {
+            self.init();
+            self.inited = true;
+        }
+
+        self.inner.poll().await
+    }
+
+    fn endpoint_set_stalled(&mut self, ep_addr: EndpointAddress, stalled: bool) {
+        self.inner.endpoint_set_stalled(ep_addr, stalled)
+    }
+
+    fn endpoint_is_stalled(&mut self, ep_addr: EndpointAddress) -> bool {
+        self.inner.endpoint_is_stalled(ep_addr)
+    }
+
+    fn endpoint_set_enabled(&mut self, ep_addr: EndpointAddress, enabled: bool) {
+        self.inner.endpoint_set_enabled(ep_addr, enabled)
+    }
+
+    async fn enable(&mut self) {
+        self.inner.enable().await
+    }
+
+    async fn disable(&mut self) {
+        self.inner.disable().await;
+        Bus::disable(self);
+    }
+
+    async fn remote_wakeup(&mut self) -> Result<(), Unsupported> {
+        self.inner.remote_wakeup().await
+    }
+}
+
+impl<'d, T: Instance> Drop for Bus<'d, T> {
+    fn drop(&mut self) {
+        Bus::disable(self);
+    }
+}
+
+pub(super) trait SealedInstance {
+    const HIGH_SPEED: bool;
+    const FIFO_DEPTH_WORDS: u16;
+
+    fn regs() -> Otg;
+    fn state() -> State<'static>;
+
+    /// Bring up the PHY that feeds this instance, if it needs a bring-up of its own.
+    ///
+    /// Called by `common_init` before the OTG core is enabled and reset. Empty for every
+    /// family whose PHY is handled by the core's own clock/power gating.
+    fn phy_init() {}
+}
+
+/// STM32N6: map the PHY reference clock to `USBPHYC_CR.FSEL`.
+///
+/// The integrated High-Speed PHY only accepts these three frequencies
+/// (RM0486 Rev 4, `USBPHYC_CR.FSEL`, p. 3929).
+#[cfg(stm32n6)]
+pub(super) fn fsel_from_freq(freq: crate::time::Hertz) -> crate::pac::usbphyc::vals::Fsel {
+    use crate::pac::usbphyc::vals::Fsel;
+
+    match freq.0 {
+        19_200_000 => Fsel::Mhz192,
+        20_000_000 => Fsel::Mhz20,
+        24_000_000 => Fsel::Mhz24,
+        _ => panic!(
+            "USB HS PHY reference clock should be 19.2, 20 or 24 MHz but is {} Hz. Please double-check your RCC settings.",
+            freq.0
+        ),
+    }
+}
+
+/// USB instance trait.
+#[allow(private_bounds)]
+pub trait Instance: SealedInstance + PeripheralType + RccPeripheral + 'static {
+    /// Interrupt for this USB instance.
+    type Interrupt: interrupt::typelevel::Interrupt;
+}
+
+// Internal PHY pins
+pin_trait!(DpPin, Instance);
+pin_trait!(DmPin, Instance);
+
+// External PHY pins
+pin_trait!(UlpiClkPin, Instance);
+pin_trait!(UlpiDirPin, Instance);
+pin_trait!(UlpiNxtPin, Instance);
+pin_trait!(UlpiStpPin, Instance);
+pin_trait!(UlpiD0Pin, Instance);
+pin_trait!(UlpiD1Pin, Instance);
+pin_trait!(UlpiD2Pin, Instance);
+pin_trait!(UlpiD3Pin, Instance);
+pin_trait!(UlpiD4Pin, Instance);
+pin_trait!(UlpiD5Pin, Instance);
+pin_trait!(UlpiD6Pin, Instance);
+pin_trait!(UlpiD7Pin, Instance);
+
+foreach_interrupt!(
+    (USB_OTG_FS, otg, $block:ident, GLOBAL, $irq:ident) => {
+        impl crate::peripherals::USB_OTG_FS {
+            cfg_if::cfg_if! {
+                if #[cfg(any(
+                    stm32f1,
+                    stm32f2,
+                    stm32f401,
+                    stm32f405,
+                    stm32f407,
+                    stm32f411,
+                    stm32f415,
+                    stm32f417,
+                    stm32f427,
+                    stm32f429,
+                    stm32f437,
+                    stm32f439,
+                ))] {
+                    const ENDPOINT_COUNT: usize = 4;
+                } else if #[cfg(any(
+                    stm32f412,
+                    stm32f413,
+                    stm32f423,
+                    stm32f446,
+                    stm32f469,
+                    stm32f479,
+                    stm32f7,
+                    stm32l4,
+                    stm32u5,
+                    stm32wba,
+                    stm32h7rs,
+                ))] {
+                    const ENDPOINT_COUNT: usize = 6;
+                } else if #[cfg(stm32g0x1)] {
+                    const ENDPOINT_COUNT: usize = 8;
+                } else if #[cfg(stm32h7)] {
+                    const ENDPOINT_COUNT: usize = 9;
+                } else {
+                    compile_error!("USB_OTG_FS peripheral is not supported by this chip.");
+                }
+            }
+        }
+
+        impl SealedInstance for crate::peripherals::USB_OTG_FS {
+            const HIGH_SPEED: bool = false;
+
+            cfg_if::cfg_if! {
+                if #[cfg(any(
+                    stm32f1,
+                    stm32f2,
+                    stm32f401,
+                    stm32f405,
+                    stm32f407,
+                    stm32f411,
+                    stm32f415,
+                    stm32f417,
+                    stm32f427,
+                    stm32f429,
+                    stm32f437,
+                    stm32f439,
+                    stm32f412,
+                    stm32f413,
+                    stm32f423,
+                    stm32f446,
+                    stm32f469,
+                    stm32f479,
+                    stm32f7,
+                    stm32l4,
+                    stm32u5,
+                    stm32wba,
+                    stm32h7rs,
+                ))] {
+                    const FIFO_DEPTH_WORDS: u16 = 320;
+                } else if #[cfg(stm32g0x1)] {
+                    const FIFO_DEPTH_WORDS: u16 = 512;
+                } else if #[cfg(stm32h7)] {
+                    const FIFO_DEPTH_WORDS: u16 = 1024;
+                } else {
+                    compile_error!("USB_OTG_FS peripheral is not supported by this chip.");
+                }
+            }
+
+            fn regs() -> Otg {
+                unsafe { Otg::from_ptr(crate::pac::USB_OTG_FS.as_ptr()) }
+            }
+
+            fn state() -> State<'static> {
+                use embassy_usb_synopsys_otg::StateStorage;
+                use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+
+                const EP_COUNT: usize = crate::peripherals::USB_OTG_FS::ENDPOINT_COUNT;
+                static STATE: StateStorage<EP_COUNT> = StateStorage::new(CriticalSectionRawMutex::new());
+                STATE.as_state()
+            }
+        }
+
+        impl Instance for crate::peripherals::USB_OTG_FS {
+            type Interrupt = crate::interrupt::typelevel::$irq;
+        }
+    };
+
+    (USB_OTG_HS, otg, $block:ident, GLOBAL, $irq:ident) => {
+        impl crate::peripherals::USB_OTG_HS {
+            cfg_if::cfg_if! {
+                if #[cfg(any(
+                    stm32f2,
+                    stm32f405,
+                    stm32f407,
+                    stm32f415,
+                    stm32f417,
+                    stm32f427,
+                    stm32f429,
+                    stm32f437,
+                    stm32f439,
+                ))] {
+                    const ENDPOINT_COUNT: usize = 6;
+                } else if #[cfg(any(
+                    stm32f446,
+                    stm32f469,
+                    stm32f479,
+                    stm32f7,
+                    stm32h7, stm32h7rs,
+                ))] {
+                    const ENDPOINT_COUNT: usize = 9;
+                } else if #[cfg(any(stm32u5, stm32wba))] {
+                    const ENDPOINT_COUNT: usize = 9;
+                } else {
+                    compile_error!("USB_OTG_HS peripheral is not supported by this chip.");
+                }
+            }
+        }
+
+        impl SealedInstance for crate::peripherals::USB_OTG_HS {
+            const HIGH_SPEED: bool = true;
+
+            cfg_if::cfg_if! {
+                if #[cfg(any(
+                    stm32f2,
+                    stm32f405,
+                    stm32f407,
+                    stm32f415,
+                    stm32f417,
+                    stm32f427,
+                    stm32f429,
+                    stm32f437,
+                    stm32f439,
+                ))] {
+                    const FIFO_DEPTH_WORDS: u16 = 1024;
+                } else if #[cfg(any(
+                    stm32f446,
+                    stm32f469,
+                    stm32f479,
+                    stm32f7,
+                    stm32h7, stm32h7rs,
+                ))] {
+                    const FIFO_DEPTH_WORDS: u16 = 1024;
+                } else if #[cfg(any(stm32u5, stm32wba))] {
+                    const FIFO_DEPTH_WORDS: u16 = 1024;
+                } else {
+                    compile_error!("USB_OTG_HS peripheral is not supported by this chip.");
+                }
+            }
+
+            fn regs() -> Otg {
+                // OTG HS registers are a superset of FS registers
+                unsafe { Otg::from_ptr(crate::pac::USB_OTG_HS.as_ptr()) }
+            }
+
+            fn state() -> State<'static> {
+                use embassy_usb_synopsys_otg::StateStorage;
+                use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+
+                const EP_COUNT: usize = crate::peripherals::USB_OTG_HS::ENDPOINT_COUNT;
+                static STATE: StateStorage<EP_COUNT> = StateStorage::new(CriticalSectionRawMutex::new());
+                STATE.as_state()
+            }
+        }
+
+        impl Instance for crate::peripherals::USB_OTG_HS {
+            type Interrupt = crate::interrupt::typelevel::$irq;
+        }
+    };
+
+    (USB1_OTG_HS, otg, $block:ident, GLOBAL, $irq:ident) => {
+        impl crate::peripherals::USB1_OTG_HS {
+            cfg_if::cfg_if! {
+                if #[cfg(stm32n6)] {
+                    // RM0486 Rev 4, §73.3 Table 736, p. 3762: 9 bidirectional device
+                    // endpoints including EP0, and 4 KB of dedicated SRAM = 1024 words.
+                    const ENDPOINT_COUNT: usize = 9;
+                } else {
+                    compile_error!("USB1_OTG_HS peripheral is not supported by this chip.");
+                }
+            }
+        }
+
+        impl SealedInstance for crate::peripherals::USB1_OTG_HS {
+            const HIGH_SPEED: bool = true;
+
+            cfg_if::cfg_if! {
+                if #[cfg(stm32n6)] {
+                    const FIFO_DEPTH_WORDS: u16 = 1024;
+                } else {
+                    compile_error!("USB1_OTG_HS peripheral is not supported by this chip.");
+                }
+            }
+
+            fn regs() -> Otg {
+                unsafe { Otg::from_ptr(crate::pac::USB1_OTG_HS.as_ptr()) }
+            }
+
+            fn state() -> State<'static> {
+                use embassy_usb_synopsys_otg::StateStorage;
+                use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+
+                const EP_COUNT: usize = crate::peripherals::USB1_OTG_HS::ENDPOINT_COUNT;
+                static STATE: StateStorage<EP_COUNT> = StateStorage::new(CriticalSectionRawMutex::new());
+                STATE.as_state()
+            }
+
+            fn phy_init() {
+                let fsel = fsel_from_freq(<Self as crate::rcc::SealedRccPeripheral>::frequency());
+                let rcc = crate::pac::RCC;
+
+                // The RM requires the PHY trims to be programmed while the PHY is under
+                // reset (RM0486 Rev 4, §74.4.4, p. 3928) and says nothing either way about
+                // FSEL, which lives next to them in USBPHYC_CR; program it in the same
+                // window to be safe. Use the atomic set/clear reset registers so the reset
+                // stays asserted across the write; the generic `rcc::enable_and_reset`
+                // would already have released it.
+                rcc.ahb5rstsr().write(|w| {
+                    w.set_otgphy1rsts(true);
+                    w.set_syscfgotghsphy1rsts(true);
+                });
+                // Clocking the PHY by hand skips the RCC refcount. That is fine here:
+                // the PHY is private to its OTG core and lives and dies with it.
+                rcc.ahb5ensr().write(|w| w.set_otgphy1ens(true));
+                // The trims (TRIM1CR / TRIM2CR) keep their reset values, which are the
+                // recommended ones (RM0486 Rev 4, §74.5, pp. 3930-3934).
+                crate::pac::OTG1PHYCTL.cr().modify(|w| w.set_fsel(fsel));
+                rcc.ahb5rstcr().write(|w| {
+                    w.set_otgphy1rstc(true);
+                    w.set_syscfgotghsphy1rstc(true);
+                });
+            }
+        }
+
+        impl Instance for crate::peripherals::USB1_OTG_HS {
+            type Interrupt = crate::interrupt::typelevel::$irq;
+        }
+    };
+
+    (USB2_OTG_HS, otg, $block:ident, GLOBAL, $irq:ident) => {
+        impl crate::peripherals::USB2_OTG_HS {
+            cfg_if::cfg_if! {
+                if #[cfg(stm32n6)] {
+                    // Second instance, identical to the first — RM0486 Rev 4,
+                    // §73.3 Table 736, p. 3762.
+                    const ENDPOINT_COUNT: usize = 9;
+                } else {
+                    compile_error!("USB2_OTG_HS peripheral is not supported by this chip.");
+                }
+            }
+        }
+
+        impl SealedInstance for crate::peripherals::USB2_OTG_HS {
+            const HIGH_SPEED: bool = true;
+
+            cfg_if::cfg_if! {
+                if #[cfg(stm32n6)] {
+                    const FIFO_DEPTH_WORDS: u16 = 1024;
+                } else {
+                    compile_error!("USB2_OTG_HS peripheral is not supported by this chip.");
+                }
+            }
+
+            fn regs() -> Otg {
+                unsafe { Otg::from_ptr(crate::pac::USB2_OTG_HS.as_ptr()) }
+            }
+
+            fn state() -> State<'static> {
+                use embassy_usb_synopsys_otg::StateStorage;
+                use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+
+                const EP_COUNT: usize = crate::peripherals::USB2_OTG_HS::ENDPOINT_COUNT;
+                static STATE: StateStorage<EP_COUNT> = StateStorage::new(CriticalSectionRawMutex::new());
+                STATE.as_state()
+            }
+
+            fn phy_init() {
+                // Same sequence as USB1_OTG_HS above, on PHY2.
+                let fsel = fsel_from_freq(<Self as crate::rcc::SealedRccPeripheral>::frequency());
+                let rcc = crate::pac::RCC;
+
+                rcc.ahb5rstsr().write(|w| {
+                    w.set_otgphy2rsts(true);
+                    w.set_syscfgotghsphy2rsts(true);
+                });
+                rcc.ahb5ensr().write(|w| w.set_otgphy2ens(true));
+                crate::pac::OTG2PHYCTL.cr().modify(|w| w.set_fsel(fsel));
+                rcc.ahb5rstcr().write(|w| {
+                    w.set_otgphy2rstc(true);
+                    w.set_syscfgotghsphy2rstc(true);
+                });
+            }
+        }
+
+        impl Instance for crate::peripherals::USB2_OTG_HS {
+            type Interrupt = crate::interrupt::typelevel::$irq;
+        }
+    };
+);
+
+// ======== USB Host Mode ========
+
+#[cfg(feature = "usb-host")]
+mod host_impl {
+    use core::marker::PhantomData;
+
+    use embassy_usb_synopsys_otg::PhyType;
+    use embassy_usb_synopsys_otg::host::{
+        HostState, OtgHost as OtgHostDriver, OtgHostInstance, on_host_interrupt as on_host_interrupt_impl,
+    };
+
+    use super::*;
+
+    /// Per-instance host state, analogous to `SealedInstance::state()` for device mode.
+    #[allow(private_bounds)]
+    pub(super) trait SealedHostInstance: Instance {
+        fn host_state() -> HostState<'static>;
+    }
+
+    foreach_interrupt!(
+        (USB_OTG_FS, otg, $block:ident, GLOBAL, $irq:ident) => {
+            impl SealedHostInstance for crate::peripherals::USB_OTG_FS {
+                fn host_state() -> HostState<'static> {
+                    use embassy_usb_synopsys_otg::host::HostStateStorage;
+                    use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+
+                    const CH_COUNT:usize = crate::peripherals::USB_OTG_FS::ENDPOINT_COUNT;
+                    static STATE: HostStateStorage<CH_COUNT> = HostStateStorage::new(CriticalSectionRawMutex::new());
+                    STATE.as_host_state()
+                }
+            }
+        };
+        (USB_OTG_HS, otg, $block:ident, GLOBAL, $irq:ident) => {
+            impl SealedHostInstance for crate::peripherals::USB_OTG_HS {
+                fn host_state() -> HostState<'static> {
+                    use embassy_usb_synopsys_otg::host::HostStateStorage;
+                    use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+
+                    const CH_COUNT:usize = crate::peripherals::USB_OTG_HS::ENDPOINT_COUNT;
+                    static STATE: HostStateStorage<CH_COUNT> = HostStateStorage::new(CriticalSectionRawMutex::new());
+                    STATE.as_host_state()
+                }
+            }
+        };
+    );
+
+    /// USB host interrupt handler.
+    #[allow(private_bounds)]
+    pub struct HostInterruptHandler<T: SealedHostInstance> {
+        _marker: PhantomData<T>,
+    }
+
+    impl<T: SealedHostInstance> interrupt::typelevel::Handler<T::Interrupt> for HostInterruptHandler<T> {
+        unsafe fn on_interrupt() {
+            let r = T::regs();
+            on_host_interrupt_impl(r, &T::host_state());
+        }
+    }
+
+    /// USB host driver.
+    #[allow(private_interfaces, private_bounds)]
+    pub struct HostDriver<'d, T: SealedHostInstance> {
+        phantom: PhantomData<&'d mut T>,
+        inner: OtgHostDriver<'d>,
+    }
+
+    #[allow(private_bounds)]
+    impl<'d, T: SealedHostInstance> HostDriver<'d, T> {
+        /// Initializes USB OTG peripheral in host mode with internal Full-Speed PHY.
+        pub fn new_fs_host(
+            _peri: crate::Peri<'d, T>,
+            dp: crate::Peri<'d, impl DpPin<T>>,
+            dm: crate::Peri<'d, impl DmPin<T>>,
+            _irq: impl interrupt::typelevel::Binding<T::Interrupt, HostInterruptHandler<T>> + 'd,
+        ) -> Self {
+            #[cfg(usb_alternate_function)]
+            {
+                set_as_af!(dp, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+                set_as_af!(dm, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+            }
+            #[cfg(not(usb_alternate_function))]
+            let _ = (dp, dm);
+
+            super::super::common_init::<T>();
+
+            // The ULPI clock has to be disabled for an internal PHY.
+            // Left enabled, the OTG_HS core waits on an absent external ULPI PHY
+            // and never enters host mode, so no downstream device is ever detected.
+            #[cfg(stm32h7)]
+            critical_section::with(|_| {
+                let rcc = crate::pac::RCC;
+                if T::HIGH_SPEED {
+                    rcc.ahb1enr().modify(|w| w.set_usb_otg_hs_ulpien(false));
+                    rcc.ahb1lpenr().modify(|w| w.set_usb_otg_hs_ulpilpen(false));
+                } else {
+                    rcc.ahb1enr().modify(|w| w.set_usb_otg_fs_ulpien(false));
+                    rcc.ahb1lpenr().modify(|w| w.set_usb_otg_fs_ulpilpen(false));
+                }
+            });
+
+            let instance = OtgHostInstance {
+                regs: T::regs(),
+                state: T::host_state(),
+                fifo_depth_words: T::FIFO_DEPTH_WORDS,
+                phy_type: PhyType::InternalFullSpeed,
+            };
+
+            Self {
+                inner: OtgHostDriver::new(instance),
+                phantom: PhantomData,
+            }
+        }
+
+        /// Initializes USB OTG peripheral in host mode with internal High-Speed PHY.
+        pub fn new_hs_host(
+            _peri: crate::Peri<'d, T>,
+            dp: crate::Peri<'d, impl DpPin<T>>,
+            dm: crate::Peri<'d, impl DmPin<T>>,
+            _irq: impl interrupt::typelevel::Binding<T::Interrupt, HostInterruptHandler<T>> + 'd,
+        ) -> Self {
+            #[cfg(usb_alternate_function)]
+            {
+                set_as_af!(dp, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+                set_as_af!(dm, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+            }
+            #[cfg(not(usb_alternate_function))]
+            let _ = (dp, dm);
+
+            super::super::common_init::<T>();
+
+            // Enable HS PHY clock and configure PHY for WBA devices.
+            #[cfg(all(stm32wba, peri_usb_otg_hs))]
+            {
+                critical_section::with(|_| {
+                    crate::pac::RCC.ahb2enr().modify(|w| {
+                        w.set_usb_otg_hs_phyen(true);
+                    });
+                });
+
+                crate::pac::SYSCFG.otghsphytuner2().modify(|w| {
+                    w.set_compdistune(0b010);
+                    w.set_sqrxtune(0b000);
+                });
+
+                crate::pac::SYSCFG.otghsphycr().modify(|w| {
+                    w.set_en(true);
+                });
+            }
+
+            let instance = OtgHostInstance {
+                regs: T::regs(),
+                state: T::host_state(),
+                fifo_depth_words: T::FIFO_DEPTH_WORDS,
+                phy_type: PhyType::InternalHighSpeed,
+            };
+
+            Self {
+                inner: OtgHostDriver::new(instance),
+                phantom: PhantomData,
+            }
+        }
+    }
+
+    #[allow(private_bounds)]
+    impl<'d, T: SealedHostInstance> embassy_usb_driver::host::UsbHostController<'d> for HostDriver<'d, T> {
+        type Allocator = <OtgHostDriver<'d> as embassy_usb_driver::host::UsbHostController<'d>>::Allocator;
+
+        fn allocator(&self) -> Self::Allocator {
+            self.inner.allocator()
+        }
+
+        async fn wait_for_device_event(&mut self) -> embassy_usb_driver::host::DeviceEvent {
+            self.inner.wait_for_device_event().await
+        }
+
+        async fn bus_reset(&mut self) {
+            self.inner.bus_reset().await
+        }
+    }
+}
+
+#[cfg(feature = "usb-host")]
+pub use host_impl::*;
+
+fn calculate_trdt<T: Instance>(speed: Dspd) -> u8 {
+    let ahb_freq = T::bus_frequency().0;
+    match speed {
+        Dspd::HIGH_SPEED => {
+            // From RM0431 (F72xx), RM0090 (F429), RM0390 (F446)
+            if ahb_freq >= 30_000_000 || cfg!(stm32h7rs) {
+                0x9
+            } else {
+                panic!("AHB frequency is too low")
+            }
+        }
+        Dspd::FULL_SPEED_EXTERNAL | Dspd::FULL_SPEED_INTERNAL => {
+            // From RM0431 (F72xx), RM0090 (F429)
+            match ahb_freq {
+                0..=14_199_999 => panic!("AHB frequency is too low"),
+                14_200_000..=14_999_999 => 0xF,
+                15_000_000..=15_999_999 => 0xE,
+                16_000_000..=17_199_999 => 0xD,
+                17_200_000..=18_499_999 => 0xC,
+                18_500_000..=19_999_999 => 0xB,
+                20_000_000..=21_799_999 => 0xA,
+                21_800_000..=23_999_999 => 0x9,
+                24_000_000..=27_499_999 => 0x8,
+                27_500_000..=31_999_999 => 0x7, // 27.7..32 in code from CubeIDE
+                32_000_000..=u32::MAX => 0x6,
+            }
+        }
+        _ => unimplemented!(),
+    }
+}

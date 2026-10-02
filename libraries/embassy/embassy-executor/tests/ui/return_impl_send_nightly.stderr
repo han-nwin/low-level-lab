@@ -1,0 +1,10 @@
+error[E0271]: type mismatch resolving `<() as _EmbassyInternalTaskTrait>::Fut == impl Send`
+ --> tests/ui/return_impl_send_nightly.rs:3:1
+  |
+3 | #[embassy_executor::task]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^
+  | |
+  | types differ
+  | type mismatch resolving `<() as _EmbassyInternalTaskTrait>::Fut == impl Send`
+  |
+  = note: this error originates in the attribute macro `embassy_executor::task` (in Nightly builds, run with -Z macro-backtrace for more info)

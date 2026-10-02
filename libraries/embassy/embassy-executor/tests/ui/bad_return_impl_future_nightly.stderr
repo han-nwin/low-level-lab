@@ -1,0 +1,10 @@
+error[E0271]: type mismatch resolving `<() as _EmbassyInternalTaskTrait>::Fut == impl Future<Output = u32>`
+ --> tests/ui/bad_return_impl_future_nightly.rs:4:1
+  |
+4 | #[embassy_executor::task]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^
+  | |
+  | types differ
+  | type mismatch resolving `<() as _EmbassyInternalTaskTrait>::Fut == impl Future<Output = u32>`
+  |
+  = note: this error originates in the attribute macro `embassy_executor::task` (in Nightly builds, run with -Z macro-backtrace for more info)

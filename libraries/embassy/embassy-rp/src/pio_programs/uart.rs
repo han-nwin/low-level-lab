@@ -1,0 +1,277 @@
+//! Pio backed uart drivers
+
+use core::convert::Infallible;
+
+use embedded_io_async::{ErrorType, Read, Write};
+
+use crate::Peri;
+use crate::gpio::Level;
+use crate::pio::{
+    Common, Config, Direction as PioDirection, FifoJoin, Instance, LoadedProgram, PioPin, ShiftDirection, StateMachine,
+};
+use crate::pio_programs::clock_divider::calculate_pio_clock_divider;
+
+///This struct is a unification of the PioRx and PioTx state machines.
+pub struct PioUart<'d, P: Instance, const TX_SM: usize, const RX_SM: usize> {
+    ///Transimiter half of the Pio Uart
+    pub tx: PioUartTx<'d, P, TX_SM>,
+    ///Receiver half of the Pio Uart
+    pub rx: PioUartRx<'d, P, RX_SM>,
+}
+
+impl<'d, P, const TX_SM: usize, const RX_SM: usize> PioUart<'d, P, TX_SM, RX_SM>
+where
+    P: Instance,
+{
+    /// Configures a new instance of pio uart
+    pub fn new(
+        baud: u32,
+        common: &mut Common<'d, P>,
+        tx_sm: StateMachine<'d, P, TX_SM>,
+        rx_sm: StateMachine<'d, P, RX_SM>,
+        tx_pin: Peri<'d, impl PioPin>,
+        rx_pin: Peri<'d, impl PioPin>,
+    ) -> Self {
+        let tx_prg = PioUartTxProgram::new(common);
+        let rx_prg = PioUartRxProgram::new(common);
+        Self {
+            tx: PioUartTx::new(baud, common, tx_sm, tx_pin, &tx_prg),
+            rx: PioUartRx::new(baud, common, rx_sm, rx_pin, &rx_prg),
+        }
+    }
+    /// Split the Uart into a transmitter and receiver, which is particularly
+    /// useful when having two tasks correlating to transmitting and receiving.
+    pub fn split(self) -> (PioUartTx<'d, P, TX_SM>, PioUartRx<'d, P, RX_SM>) {
+        (self.tx, self.rx)
+    }
+    /// Split the Uart into a transmitter and receiver by mutable reference,
+    /// which is particularly useful when having two tasks correlating to
+    /// transmitting and receiving.
+    pub fn split_ref(&mut self) -> (&mut PioUartTx<'d, P, TX_SM>, &mut PioUartRx<'d, P, RX_SM>) {
+        (&mut self.tx, &mut self.rx)
+    }
+}
+
+/// This struct represents a uart tx program loaded into pio instruction memory.
+pub struct PioUartTxProgram<'d, PIO: Instance> {
+    prg: LoadedProgram<'d, PIO>,
+}
+
+impl<'d, PIO: Instance> PioUartTxProgram<'d, PIO> {
+    /// Load the uart tx program into the given pio
+    pub fn new(common: &mut Common<'d, PIO>) -> Self {
+        let prg = pio::pio_asm!(
+            r#"
+                .side_set 1 opt
+
+                ; An 8n1 UART transmit program.
+                ; OUT pin 0 and side-set pin 0 are both mapped to UART TX pin.
+
+                    nop        side 1 [7]  ; Stop bit/idle time
+                    pull       side 1 [7]  ; Assert stop bit, or stall with line in idle state
+                    set x, 7   side 0 [7]  ; Preload bit counter, assert start bit for 8 clocks
+                bitloop:                   ; This loop will run 8 times (8n1 UART)
+                    out pins, 1            ; Shift 1 bit from OSR to the first OUT pin
+                    jmp x-- bitloop   [6]  ; Each loop iteration is 8 cycles.
+            "#
+        );
+
+        let prg = common.load_program(&prg.program);
+
+        Self { prg }
+    }
+}
+
+/// PIO backed Uart transmitter
+pub struct PioUartTx<'d, PIO: Instance, const SM: usize> {
+    sm_tx: StateMachine<'d, PIO, SM>,
+}
+
+impl<'d, PIO: Instance, const SM: usize> PioUartTx<'d, PIO, SM> {
+    /// Configure a pio state machine to use the loaded tx program.
+    pub fn new(
+        baud: u32,
+        common: &mut Common<'d, PIO>,
+        mut sm_tx: StateMachine<'d, PIO, SM>,
+        tx_pin: Peri<'d, impl PioPin>,
+        program: &PioUartTxProgram<'d, PIO>,
+    ) -> Self {
+        let tx_pin = common.make_pio_pin(tx_pin);
+        sm_tx.set_pins(Level::High, &[&tx_pin]);
+        sm_tx.set_pin_dirs(PioDirection::Out, &[&tx_pin]);
+
+        let mut cfg = Config::default();
+
+        cfg.set_out_pins(&[&tx_pin]);
+        cfg.use_program(&program.prg, &[&tx_pin]);
+        cfg.shift_out.auto_fill = false;
+        cfg.shift_out.direction = ShiftDirection::Right;
+        cfg.fifo_join = FifoJoin::TxOnly;
+        cfg.clock_divider = calculate_pio_clock_divider(8 * baud);
+        sm_tx.set_config(&cfg);
+        sm_tx.set_enable(true);
+
+        Self { sm_tx }
+    }
+
+    /// Write a single u8
+    pub async fn write_u8(&mut self, data: u8) {
+        self.sm_tx.tx().wait_push(data as u32).await;
+    }
+
+    /// Write all bytes in `buf`.
+    ///
+    /// Returns once all bytes have been pushed into the state machine's TX FIFO.
+    pub async fn write(&mut self, buf: &[u8]) {
+        for byte in buf {
+            self.write_u8(*byte).await;
+        }
+    }
+
+    /// Wait until all written bytes have been fully transmitted on the wire.
+    pub async fn flush(&mut self) {
+        // There's no PIO interrupt for "TX FIFO empty" or "stalled", so poll.
+        while !self.sm_tx.tx().empty() {
+            embassy_futures::yield_now().await;
+        }
+        // The FIFO is empty but the SM may still be shifting out the last byte. It stalls
+        // on `pull` once the stop bit is done, so clear the stall flag and wait for it to be set again.
+        let _ = self.sm_tx.tx().stalled();
+        while !self.sm_tx.tx().stalled() {
+            embassy_futures::yield_now().await;
+        }
+    }
+
+    /// Change baud rate on run time  
+    pub fn set_baudrate(&mut self, baud: u32) {
+        let clock_divider = calculate_pio_clock_divider(8 * baud);
+        self.sm_tx.set_enable(false);
+        self.sm_tx.clear_fifos();
+        self.sm_tx.restart();
+        self.sm_tx.set_clock_divider(clock_divider);
+        self.sm_tx.set_enable(true);
+    }
+}
+
+impl<PIO: Instance, const SM: usize> ErrorType for PioUartTx<'_, PIO, SM> {
+    type Error = Infallible;
+}
+
+impl<PIO: Instance, const SM: usize> Write for PioUartTx<'_, PIO, SM> {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Infallible> {
+        PioUartTx::write(self, buf).await;
+        Ok(buf.len())
+    }
+
+    async fn flush(&mut self) -> Result<(), Infallible> {
+        PioUartTx::flush(self).await;
+        Ok(())
+    }
+}
+
+/// This struct represents a Uart Rx program loaded into pio instruction memory.
+pub struct PioUartRxProgram<'d, PIO: Instance> {
+    prg: LoadedProgram<'d, PIO>,
+}
+
+impl<'d, PIO: Instance> PioUartRxProgram<'d, PIO> {
+    /// Load the uart rx program into the given pio
+    pub fn new(common: &mut Common<'d, PIO>) -> Self {
+        let prg = pio::pio_asm!(
+            r#"
+                ; Slightly more fleshed-out 8n1 UART receiver which handles framing errors and
+                ; break conditions more gracefully.
+                ; IN pin 0 and JMP pin are both mapped to the GPIO used as UART RX.
+
+                start:
+                    wait 0 pin 0        ; Stall until start bit is asserted
+                    set x, 7    [10]    ; Preload bit counter, then delay until halfway through
+                rx_bitloop:             ; the first data bit (12 cycles incl wait, set).
+                    in pins, 1          ; Shift data bit into ISR
+                    jmp x-- rx_bitloop [6] ; Loop 8 times, each loop iteration is 8 cycles
+                    jmp pin good_rx_stop  ; Check stop bit (should be high)
+
+                    irq 4 rel           ; Either a framing error or a break. Set a sticky flag,
+                    wait 1 pin 0        ; and wait for line to return to idle state.
+                    jmp start           ; Don't push data if we didn't see good framing.
+
+                good_rx_stop:           ; No delay before returning to start; a little slack is
+                    in null 24
+                    push                ; important in case the TX clock is slightly too fast.
+            "#
+        );
+
+        let prg = common.load_program(&prg.program);
+
+        Self { prg }
+    }
+}
+
+/// PIO backed Uart receiver
+pub struct PioUartRx<'d, PIO: Instance, const SM: usize> {
+    sm_rx: StateMachine<'d, PIO, SM>,
+}
+
+impl<'d, PIO: Instance, const SM: usize> PioUartRx<'d, PIO, SM> {
+    /// Configure a pio state machine to use the loaded rx program.
+    pub fn new(
+        baud: u32,
+        common: &mut Common<'d, PIO>,
+        mut sm_rx: StateMachine<'d, PIO, SM>,
+        rx_pin: Peri<'d, impl PioPin>,
+        program: &PioUartRxProgram<'d, PIO>,
+    ) -> Self {
+        let mut cfg = Config::default();
+        cfg.use_program(&program.prg, &[]);
+
+        let mut rx_pin = common.make_pio_pin(rx_pin);
+        rx_pin.set_pull(crate::gpio::Pull::Up);
+        cfg.set_in_pins(&[&rx_pin]);
+        cfg.set_jmp_pin(&rx_pin);
+        sm_rx.set_pins(Level::High, &[&rx_pin]);
+
+        cfg.clock_divider = calculate_pio_clock_divider(8 * baud);
+        cfg.shift_in.auto_fill = false;
+        cfg.shift_in.direction = ShiftDirection::Right;
+        cfg.shift_in.threshold = 32;
+        cfg.fifo_join = FifoJoin::RxOnly;
+        sm_rx.set_pin_dirs(PioDirection::In, &[&rx_pin]);
+        sm_rx.set_config(&cfg);
+        sm_rx.set_enable(true);
+
+        Self { sm_rx }
+    }
+
+    /// Wait for a single u8
+    pub async fn read_u8(&mut self) -> u8 {
+        self.sm_rx.rx().wait_pull().await as u8
+    }
+
+    /// Read bytes until `buf` is full.
+    pub async fn read(&mut self, buf: &mut [u8]) {
+        for byte in buf {
+            *byte = self.read_u8().await;
+        }
+    }
+
+    /// Change Baud rate on runtime
+    pub fn set_baudrate(&mut self, baud: u32) {
+        let clock_divider = calculate_pio_clock_divider(8 * baud);
+        self.sm_rx.set_enable(false);
+        self.sm_rx.clear_fifos();
+        self.sm_rx.restart();
+        self.sm_rx.set_clock_divider(clock_divider);
+        self.sm_rx.set_enable(true);
+    }
+}
+
+impl<PIO: Instance, const SM: usize> ErrorType for PioUartRx<'_, PIO, SM> {
+    type Error = Infallible;
+}
+
+impl<PIO: Instance, const SM: usize> Read for PioUartRx<'_, PIO, SM> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Infallible> {
+        PioUartRx::read(self, buf).await;
+        Ok(buf.len())
+    }
+}

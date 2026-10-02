@@ -1,0 +1,103 @@
+#![no_std]
+#![no_main]
+
+use defmt::*;
+use defmt_rtt as _;
+use embassy_executor::Spawner;
+use embassy_stm32::adc::{Adc, AdcChannel, Config, Exten, RegularAdcTrigger, SampleTime};
+use embassy_stm32::triggers::TIM1_CH1;
+use embassy_stm32::{bind_interrupts, dma, peripherals};
+use embassy_time::Timer;
+use panic_probe as _;
+
+bind_interrupts!(struct Irqs {
+    DMA2_STREAM2 => dma::InterruptHandler<peripherals::DMA2_CH2>;
+    DMA2_STREAM0 => dma::InterruptHandler<peripherals::DMA2_CH0>;
+});
+
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let mut p = embassy_stm32::init(Default::default());
+    info!("Hello World!");
+
+    let mut adc_dma_buf: [u16; 2] = [0; 2];
+
+    // TODO: impl. triggers for this
+    let mut adc_ring_buffered = Adc::new_blocking(p.ADC2, Config::default()).into_ring_buffered(
+        p.DMA2_CH2,
+        &mut adc_dma_buf,
+        Irqs,
+        [(p.PA0.reborrow_adc(), SampleTime::Cycles112)].into_iter(),
+        Some(RegularAdcTrigger::from(TIM1_CH1, Exten::RisingEdge)),
+    );
+    adc_ring_buffered.start();
+
+    let mut adc = Adc::new_blocking(p.ADC1, Config::default());
+    let mut pin = p.PC1;
+
+    let mut vrefint = adc.enable_vrefint();
+    let mut temp = adc.enable_temperature();
+
+    // The temperature sensor and VREFINT need t_START (10 us on the F4, see the datasheet)
+    // after being switched on before their first conversion.
+    Timer::after_micros(10).await;
+
+    {
+        let mut configured_sequence = adc.configure_sequence(
+            p.DMA2_CH0,
+            [
+                (p.PA0.reborrow_adc(), SampleTime::Cycles112),
+                (p.PA2.reborrow_adc(), SampleTime::Cycles112),
+            ]
+            .into_iter(),
+            Irqs,
+        );
+
+        let mut buf = [0u16; 4];
+
+        configured_sequence.read(&mut buf[..2]).await;
+        configured_sequence.read(&mut buf[2..]).await;
+    }
+
+    let vrefint_sample = adc.blocking_read(&mut vrefint, SampleTime::Cycles112);
+
+    let convert_to_millivolts = |sample| {
+        // From http://www.st.com/resource/en/datasheet/DM00071990.pdf
+        // 6.3.24 Reference voltage
+        const VREFINT_MV: u32 = 1210; // mV
+
+        (u32::from(sample) * VREFINT_MV / u32::from(vrefint_sample)) as u16
+    };
+
+    let convert_to_celcius = |sample| {
+        // From http://www.st.com/resource/en/datasheet/DM00071990.pdf
+        // 6.3.22 Temperature sensor characteristics
+        const V25: i32 = 760; // mV
+        const AVG_SLOPE: f32 = 2.5; // mV/C
+
+        let sample_mv = convert_to_millivolts(sample) as i32;
+
+        (sample_mv - V25) as f32 / AVG_SLOPE + 25.0
+    };
+
+    info!("VrefInt: {}", vrefint_sample);
+    const MAX_ADC_SAMPLE: u16 = (1 << 12) - 1;
+    info!("VCCA: {} mV", convert_to_millivolts(MAX_ADC_SAMPLE));
+
+    loop {
+        // Read pin
+        let v = adc.blocking_read(&mut pin, SampleTime::Cycles112);
+        info!("PC1: {} ({} mV)", v, convert_to_millivolts(v));
+
+        // Read internal temperature
+        let v = adc.blocking_read(&mut temp, SampleTime::Cycles112);
+        let celcius = convert_to_celcius(v);
+        info!("Internal temp: {} ({} C)", v, celcius);
+
+        // Read internal voltage reference
+        let v = adc.blocking_read(&mut vrefint, SampleTime::Cycles112);
+        info!("VrefInt: {}", v);
+
+        Timer::after_millis(100).await;
+    }
+}

@@ -1,0 +1,113 @@
+// required-features: nrf52840
+#![no_std]
+#![no_main]
+teleprobe_meta::target!(b"nrf52840-dk");
+teleprobe_meta::timeout!(120);
+
+use defmt::{info, unwrap};
+use defmt_rtt as _;
+use embassy_executor::Spawner;
+use embassy_net::StackStorage;
+use embassy_net_esp_hosted as hosted;
+use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
+use embassy_nrf::mode::Async;
+use embassy_nrf::rng::Rng;
+use embassy_nrf::spim::{self, Spim};
+use embassy_nrf::{bind_interrupts, peripherals};
+use embassy_time::Delay;
+use embedded_hal_bus::spi::ExclusiveDevice;
+use hosted::iface::spi::SpiInterface;
+use panic_probe as _;
+use static_cell::StaticCell;
+
+bind_interrupts!(struct Irqs {
+    SPIM3 => spim::InterruptHandler<peripherals::SPI3>;
+    RNG => embassy_nrf::rng::InterruptHandler<peripherals::RNG>;
+});
+
+// Test-only wifi network, no internet access!
+const WIFI_NETWORK: &str = "EmbassyTest";
+const WIFI_PASSWORD: &str = "V8YxhKt5CdIAJFud";
+
+#[embassy_executor::task]
+async fn wifi_task(
+    mut runner: hosted::Runner<
+        'static,
+        SpiInterface<ExclusiveDevice<Spim<'static, Async>, Output<'static>, Delay>, Input<'static>>,
+        Output<'static>,
+    >,
+) {
+    runner.run().await.expect("heartbeat stopped");
+}
+
+type MyDriver = hosted::NetDriver<'static>;
+
+#[embassy_executor::task]
+async fn net_task(mut runner: embassy_net::Runner<'static>) -> ! {
+    runner.run().await
+}
+
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    info!("Hello World!");
+
+    let p = embassy_nrf::init(Default::default());
+
+    let miso = p.P0_28;
+    let sck = p.P0_29;
+    let mosi = p.P0_30;
+    let cs = Output::new(p.P0_31, Level::High, OutputDrive::HighDrive);
+    let handshake = Input::new(p.P1_01, Pull::Up);
+    let ready = Input::new(p.P1_04, Pull::None);
+    let reset = Output::new(p.P1_05, Level::Low, OutputDrive::Standard);
+
+    let mut config = spim::Config::default();
+    config.frequency = spim::Frequency::M32;
+    config.mode = spim::MODE_2; // !!!
+    let spi = spim::Spim::new(p.SPI3, sck, mosi, miso, Irqs, config);
+    let spi = ExclusiveDevice::new(spi, cs, Delay);
+
+    let iface = SpiInterface::new(spi, handshake, ready);
+
+    static STATE: StaticCell<embassy_net_esp_hosted::State> = StaticCell::new();
+    let embassy_net_esp_hosted::HostedResources {
+        net_device,
+        mut control,
+        runner,
+    } = embassy_net_esp_hosted::new(STATE.init(embassy_net_esp_hosted::State::new()), iface, reset);
+
+    spawner.spawn(unwrap!(wifi_task(runner)));
+
+    unwrap!(control.init().await);
+    unwrap!(control.connect(WIFI_NETWORK, WIFI_PASSWORD).await);
+
+    // Generate random seed
+    let mut rng = Rng::new(p.RNG, Irqs);
+    let mut seed = [0; 8];
+    rng.blocking_fill_bytes(&mut seed);
+    let seed = u64::from_le_bytes(seed);
+
+    // Init network stack
+    static STACK: StaticCell<StackStorage> = StaticCell::new();
+    let (stack, runner) = embassy_net::Stack::new(STACK.init(StackStorage::new()), seed);
+
+    // Add the network interface to the stack.
+    static DEVICE: StaticCell<MyDriver> = StaticCell::new();
+    let iface = unwrap!(stack.add_iface_borrowed(DEVICE.init(net_device)));
+    unwrap!(iface.set_dhcpv4(Some(Default::default())));
+
+    spawner.spawn(unwrap!(net_task(runner)));
+
+    perf_client::run(
+        iface,
+        perf_client::Expected {
+            down_kbps: 50,
+            up_kbps: 50,
+            updown_kbps: 50,
+        },
+    )
+    .await;
+
+    info!("Test OK");
+    cortex_m::asm::bkpt();
+}
