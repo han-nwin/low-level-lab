@@ -1,19 +1,25 @@
 #include "uart.hpp"
-#include <hardware.hpp>
+#include <algorithm>
 #include <iostream>
 #include <ranges>
 #include <stdexcept>
 
+// NOTE:
+// UART wire
+//    ↓
+// hardware RX memory          ← armRxChunk() manages this
+//    ↓
+// software rxRing_            ← handleRxInterrupt() fills this
+//    ↓
+// application buffer          ← read() drains this
 Uart::Uart(asio::any_io_executor executor, Hardware &hw) : hw_(hw), executor_(executor) {
-    // TODO 1: reset and enable UART. Main owns interrupt-vector wiring.
-
-    // Reset Uart
+    // Main owns interrupt-vector wiring.
     hw_.write(Reg::CONTROL_0, control0::UART_RESET);
 
-    // Enable Uart
     hw_.write(Reg::CONTROL_0, control0::ENABLE);
 
-    // Don't enable interrupt here yet
+    // Background RX must start even if the application never calls read().
+    armRxChunk();
 }
 
 // Destructor, reset control register
@@ -23,15 +29,7 @@ Uart::~Uart() {
 }
 
 asio::awaitable<void> Uart::send(std::span<const std::uint8_t> bytes) {
-    // TODO 3: enforce bytes.size() <= Hardware::TX_MEM_BYTES.
-    // Set TX_OFFSET to 0, then TX_BYTE_NUMBER to bytes.size().
-    // Pack up to four bytes into each 32-bit TX MEM word, then write that word.
-    // Signal TX transfer: write txcommand::START to Reg::TX_COMMAND.
-    // Then co_await asyncWait(irq::TX_EMPTY, asio::use_awaitable).
-    // In this single-threaded simulator, IRQ callbacks are queued; asyncWait
-    // must check TX_EMPTY AND TX_BYTE_COUNT == TX_BYTE_NUMBER, including on
-    // the already-ready path. FIFO empty alone does not mean transfer complete.
-
+    // Stage bytes, start TX, then wait for the final FIFO drain (not wire idle).
     // if bytes sending more than memory capacity, throw
     if (bytes.size() > Hardware::TX_MEM_BYTES) {
         throw std::length_error("bytes are too big, limit to 64*4 bytes");
@@ -80,98 +78,131 @@ asio::awaitable<void> Uart::send(std::span<const std::uint8_t> bytes) {
     std::cout << "Tx send command triggered! Suspend until interrupt + conditions are met" << std::endl;
     // Hardware start sending here .... //
     // suspend..
-    co_await asyncWait(EventType::TX, asio::use_awaitable); // use_awaitable is a completion token
+    co_await asyncTxWait(asio::use_awaitable); // use_awaitable is a completion token
 
     std::cout << "Harware interrupt, conditions are met. ALL Bytes sent" << std::endl;
 
     co_return;
 }
 
+asio::awaitable<std::size_t> Uart::read(std::span<std::uint8_t> buffer) {
+    if (buffer.empty())
+        co_return 0;
+
+    if (readPending_)
+        throw std::logic_error("A UART read is already pending");
+
+    // Keep ownership through the posted wakeup until these bytes are consumed.
+    readPending_ = true;
+
+    // if asyncRxWait throw make sure we reset readPending_ to false
+    try {
+        if (rxSize_ == 0)
+            co_await asyncRxWait(asio::use_awaitable);
+
+        // read upto requested size or whatever available
+        const auto count = std::min(buffer.size(), rxSize_);
+        for (std::size_t i = 0; i < count; ++i) {
+            buffer[i] = rxRing_[rxHead_];
+            rxHead_ = (rxHead_ + 1) % RX_RING_CAPACITY;
+        }
+
+        rxSize_ -= count;
+        readPending_ = false;
+
+        co_return count;
+    } catch (...) {
+        readPending_ = false;
+        throw;
+    }
+}
+
+void Uart::armRxChunk() {
+    hw_.write(Reg::RX_OFFSET, 0);
+    hw_.write(Reg::RX_BYTE_NUMBER, RX_CHUNK_BYTES);
+    hw_.write(Reg::RX_COMMAND, rxcommand::START);
+
+    // Enable rx empty and rx timeout interrupt
+    const auto config = hw_.read(Reg::CONTROL_1);
+    const auto mask = control1::irqMask(config) | irq::RX_EMPTY | irq::RX_TIMEOUT;
+    hw_.write(Reg::CONTROL_1, (config & ~control1::IRQ_MASK) | (mask << control1::IRQ_SHIFT));
+}
+
+void Uart::handleRxInterrupt(std::uint32_t active) {
+    const auto count = hw_.read(Reg::RX_BYTE_COUNT);
+    const bool stopped = !(hw_.read(Reg::CONTROL_0) & control0::RX_BUSY);
+    const bool complete = stopped && ((active & irq::RX_TIMEOUT) || count == hw_.read(Reg::RX_BYTE_NUMBER));
+    if (!complete) {
+        // FIFO-empty can be an intermediate drain; do not publish bytes twice.
+        hw_.write(Reg::IRQ_CLEAR, active & irq::RX_EMPTY);
+        return;
+    }
+
+    // Hardware has stopped, so count and memory stay stable until START.
+    for (std::size_t i = 0; i < count; ++i) {
+        if (rxSize_ == RX_RING_CAPACITY) {
+            ++rxDropped_; // Keep queued bytes; drop incoming bytes when full.
+            continue;
+        }
+
+        // RX memory stores 4 bytes per 32-bit word.
+        // Read the containing word, extract byte i, then append it to the ring buffer.
+        const auto word = hw_.read(Hardware::rxMemWord(i / 4));
+        rxRing_[(rxHead_ + rxSize_) % RX_RING_CAPACITY] = static_cast<std::uint8_t>(word >> (8 * (i % 4)));
+        ++rxSize_;
+    }
+
+    hw_.write(Reg::IRQ_CLEAR, irq::RX_EMPTY | irq::RX_TIMEOUT);
+    armRxChunk(); // Resume capture before posting the application wakeup.
+
+    if (rxSize_ > 0)
+        completeRxWait({});
+}
+
 void Uart::handleInterrupt() {
-    // TODO 4a: read live status from CONTROL_0 and the mask from CONTROL_1.
-    // CONTROL_0's low status bits are not a pending-IRQ bitmap.
-    // TX_EMPTY: only completeWait when TX_BYTE_COUNT == TX_BYTE_NUMBER AND
-    // live TX_EMPTY is set. Otherwise keep the handler and interrupt enabled:
-    // hardware will refill its FIFO and interrupt again when it drains.
-    // RX_READY: complete the receive wait as before.
-
-    // Read live CONTROL_0 status and map conditions to logical IRQ sources.
-    const auto status = hw_.read(Reg::CONTROL_0);
+    // Latched sources select the branch; live status/counts decide completion.
     const auto mask = control1::irqMask(hw_.read(Reg::CONTROL_1));
-
-    std::uint32_t active = 0;
-    if (!(status & control0::RX_EMPTY))
-        active |= irq::RX_READY;
-    if (status & control0::RX_FULL)
-        active |= irq::RX_FULL;
-    if (status & control0::TX_EMPTY)
-        active |= irq::TX_EMPTY;
-    if (status & control0::TX_FULL)
-        active |= irq::TX_FULL;
-    if (status & control0::RX_TIMEOUT)
-        active |= irq::RX_TIMEOUT;
-
-    // get what needed to be active
-    active &= mask;
+    const auto active = hw_.read(Reg::IRQ_STATUS) & mask;
 
     // TX Empty
-    if (event_ == EventType::TX && (active & irq::TX_EMPTY)) {
-        // CLEAR acknowledges pending notifications; live status remains set.
-        hw_.write(Reg::CONTROL_0, control0::ENABLE | control0::CLEAR);
+    if (txHandler_ && (active & irq::TX_EMPTY)) {
+
+        // Intermediate FIFO-empty: acknowledge it, doesn't mean conditions are met
+        hw_.write(Reg::IRQ_CLEAR, irq::TX_EMPTY);
 
         // If Tx fifo empty and conditions are met (byte count = num bytes)
         if ((hw_.read(Reg::CONTROL_0) & control0::TX_EMPTY) &&
             (hw_.read(Reg::TX_BYTE_COUNT) == hw_.read(Reg::TX_BYTE_NUMBER))) {
 
-            completeWait({});
-            return;
+            completeTxWait({}); // Continue: RX may also be pending in this IRQ.
         }
     }
 
-    // RX full
-    if (event_ == EventType::RX && (active & irq::RX_READY)) {
-        hw_.write(Reg::CONTROL_0, control0::ENABLE | control0::CLEAR);
-
-        completeWait({});
-        return;
-    }
-
-    // RX timeout error
-    if (event_ == EventType::RX && (active & irq::RX_TIMEOUT)) {
-        hw_.write(Reg::CONTROL_0, control0::ENABLE | control0::CLEAR);
-
-        completeWait(boost::system::errc::make_error_code(boost::system::errc::io_error));
-        return;
-    }
-
-    return;
+    // Do not return early after TX: both directions can be active together.
+    if (active & (irq::RX_EMPTY | irq::RX_TIMEOUT))
+        handleRxInterrupt(active);
 }
 
-void Uart::completeWait(boost::system::error_code ec) {
-    // TODO 4b: mask the awaited interrupt; clear its stale latch even on the
-    // already-ready path. Move the saved handler out and clear waitingFor_.
-    // Post a lambda to executor_ that invokes the moved handler with ec.
-    // If no handler is pending, don't complete anything
-
-    // 1. mask to disable interrupt if event is tx
-    if (event_ == EventType::TX) {
-
-        // disable
-        const auto config = hw_.read(Reg::CONTROL_1);
-        const auto mask = control1::irqMask(config) & ~irq::TX_EMPTY;
-        hw_.write(Reg::CONTROL_1, (config & ~control1::IRQ_MASK) | (mask << control1::IRQ_SHIFT));
-        event_ = EventType::NONE;
-    }
-
-    // 2. post the handler back to executor runnable queue, then execute it
-    // executor will schedule and execute it
-    if (!pendingHandler_) // this ensure we only post 1
+void Uart::completeTxWait(boost::system::error_code ec) {
+    if (!txHandler_)
         return;
-    asio::post(executor_, [handler = std::move(pendingHandler_), ec]() mutable { handler(ec); });
+
+    // Disable TX_EMPTY while preserving other masks and serial settings.
+    const auto config = hw_.read(Reg::CONTROL_1);
+    const auto mask = control1::irqMask(config) & ~irq::TX_EMPTY;
+    hw_.write(Reg::CONTROL_1, (config & ~control1::IRQ_MASK) | (mask << control1::IRQ_SHIFT));
+
+    // Final Acknowledge only TX_EMPTY
+    hw_.write(Reg::IRQ_CLEAR, irq::TX_EMPTY);
+
+    // Move the handler out before posting so it can only be completed once.
+    asio::post(executor_, [handler = std::move(txHandler_), ec]() mutable { handler(ec); });
 }
 
-asio::awaitable<char> Uart::receive() {
-    // BONUS: await RX_READY, then read RX_DATA. RX_READY means !RX_EMPTY.
-    throw std::logic_error("BONUS: implement receive() in uart.cxx");
-    co_return '\0';
+void Uart::completeRxWait(boost::system::error_code ec) {
+    if (!rxHandler_)
+        return;
+
+    // Reading the ring does not disable RX; read() releases readPending_.
+    asio::post(executor_, [handler = std::move(rxHandler_), ec]() mutable { handler(ec); });
 }

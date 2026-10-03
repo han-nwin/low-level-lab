@@ -58,7 +58,7 @@ void UartNoAsync::handleInterrupt() {
     if (!(status & control0::TX_EMPTY)) return;
 
     // Acknowledge every FIFO-empty notification, including intermediate ones.
-    hw_.write(Reg::CONTROL_0, control0::ENABLE | control0::CLEAR);
+    hw_.write(Reg::IRQ_CLEAR, irq::TX_EMPTY);
     if (hw_.read(Reg::TX_BYTE_COUNT) != hw_.read(Reg::TX_BYTE_NUMBER))
         return; // Not finished: hardware will refill the FIFO and interrupt again.
 

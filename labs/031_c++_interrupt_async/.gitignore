@@ -1,2 +1,8 @@
 uart_lab
 hardware_test
+uart_rx_test
+uart_rx_test.dSYM/
+!Makefile
+
+hardware_rx_test
+hardware_rx_test.dSYM/

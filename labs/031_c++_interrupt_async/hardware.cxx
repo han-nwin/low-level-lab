@@ -10,6 +10,9 @@ std::uint32_t Hardware::read(Reg reg) {
     const auto base = static_cast<std::uint32_t>(Reg::TX_MEM_BASE);
     if (address >= base && address < base + TX_MEM_BYTES && (address - base) % 4 == 0)
         return txMemory_[(address - base) / 4];
+    const auto rxBase = static_cast<std::uint32_t>(Reg::RX_MEM_BASE);
+    if (address >= rxBase && address < rxBase + RX_MEM_BYTES && (address - rxBase) % 4 == 0)
+        return rxMemory_[(address - rxBase) / 4];
     switch (reg) {
     case Reg::CONTROL_0:
         return (rx_.empty() ? control0::RX_EMPTY : 0u) |
@@ -17,19 +20,18 @@ std::uint32_t Hardware::read(Reg reg) {
                (txFifo_.empty() ? control0::TX_EMPTY : 0u) |
                (txFifo_.size() == FIFO_CAPACITY ? control0::TX_FULL : 0u) |
                (txActive_ || txShift_ ? control0::TX_BUSY : 0u) |
+               (rxActive_ ? control0::RX_BUSY : 0u) |
                (enabled_ ? control0::ENABLE : 0u) |
                ((pending_ & irq::RX_TIMEOUT) ? control0::RX_TIMEOUT : 0u);
     case Reg::CONTROL_1: return control1_;
+    case Reg::IRQ_STATUS: return pending_;
+    case Reg::IRQ_CLEAR: return 0;
     case Reg::RX_TIMEOUT_MS: return rxTimeoutMs_;
     case Reg::RX_BYTE_NUMBER: return rxByteNumber_;
     case Reg::RX_BYTE_COUNT: return rxByteCount_;
-    case Reg::RX_DATA: {
-        if (rx_.empty()) throw std::runtime_error("RX_DATA read while RX_EMPTY");
-        const auto byte = static_cast<unsigned char>(rx_.front());
-        rx_.pop_front();
-        if (rx_.empty()) { ++rxGeneration_; rxTimer_.cancel(); }
-        return byte;
-    }
+    case Reg::RX_OFFSET: return rxOffset_;
+    case Reg::RX_COMMAND: return 0;
+    case Reg::RX_MEM_BASE: break; // Handled above
     case Reg::TX_OFFSET: return txOffset_;
     case Reg::TX_BYTE_NUMBER: return txByteNumber_;
     case Reg::TX_BYTE_COUNT: return txByteCount_;
@@ -47,24 +49,33 @@ void Hardware::write(Reg reg, std::uint32_t value) {
         txMemory_[(address - base) / 4] = value;
         return;
     }
+    const auto rxBase = static_cast<std::uint32_t>(Reg::RX_MEM_BASE);
+    if (address >= rxBase && address < rxBase + RX_MEM_BYTES && (address - rxBase) % 4 == 0)
+        throw std::runtime_error("RX memory is read-only");
     switch (reg) {
     case Reg::CONTROL_0: {
         if (value & control0::UART_RESET) { reset(); return; }
-        if (value & control0::CLEAR) pending_ = 0;
         const bool wasEnabled = enabled_;
         if (enabled_ && !(value & control0::ENABLE)) {
-            ++txGeneration_; ++rxGeneration_;
+            ++txGeneration_; ++rxGeneration_; ++rxTransferGeneration_;
+            rxScheduled_ = false;
             txTimer_.cancel(); rxTimer_.cancel();
             txScheduled_ = false;
         }
         enabled_ = (value & control0::ENABLE) != 0;
         if (enabled_) {
             scheduleTx();
+            scheduleRx();
             if (!wasEnabled) restartRxTimeout();
             queueInterrupt();
         }
         return;
     }
+    case Reg::IRQ_STATUS: throw std::runtime_error("IRQ_STATUS is read-only");
+    case Reg::IRQ_CLEAR:
+        pending_ &= ~(value & irq::ALL);
+        queueInterrupt();
+        return;
     case Reg::CONTROL_1:
         control1_ = value & control1::WRITABLE_MASK;
         queueInterrupt();
@@ -85,16 +96,17 @@ void Hardware::write(Reg reg, std::uint32_t value) {
         rxTimeoutMs_ = value;
         restartRxTimeout();
         return;
-    case Reg::RX_DATA: throw std::runtime_error("RX_DATA is read-only");
     case Reg::RX_BYTE_COUNT: throw std::runtime_error("RX_BYTE_COUNT is read-only");
+    case Reg::RX_MEM_BASE: break; // Handled above
+    case Reg::RX_OFFSET:
     case Reg::RX_BYTE_NUMBER:
-        if (value > FIFO_CAPACITY) throw std::out_of_range("RX length exceeds 16-byte FIFO");
-        if (!rx_.empty()) throw std::runtime_error("Drain RX_DATA before arming a new receive");
-        ++rxGeneration_;
-        rxTimer_.cancel();
-        rxByteNumber_ = value;
-        rxByteCount_ = 0;
-        pending_ &= ~(irq::RX_READY | irq::RX_FULL | irq::RX_TIMEOUT);
+        if (rxActive_) throw std::runtime_error("RX configuration write during active transfer");
+        if (value > RX_MEM_BYTES) throw std::out_of_range("RX offset/length exceeds memory size");
+        if (reg == Reg::RX_OFFSET) rxOffset_ = value;
+        else rxByteNumber_ = value;
+        return;
+    case Reg::RX_COMMAND:
+        if (value & rxcommand::START) startRx();
         return;
     }
     throw std::runtime_error("Unknown register");
@@ -103,6 +115,11 @@ void Hardware::write(Reg reg, std::uint32_t value) {
 Reg Hardware::txMemWord(std::size_t index) {
     if (index >= TX_MEM_WORDS) throw std::out_of_range("TX MEM word index");
     return static_cast<Reg>(static_cast<std::uint32_t>(Reg::TX_MEM_BASE) + 4 * index);
+}
+
+Reg Hardware::rxMemWord(std::size_t index) {
+    if (index >= RX_MEM_WORDS) throw std::out_of_range("RX MEM word index");
+    return static_cast<Reg>(static_cast<std::uint32_t>(Reg::RX_MEM_BASE) + 4 * index);
 }
 
 Hardware::TxMemoryView Hardware::getTxMemory() {
@@ -184,28 +201,85 @@ void Hardware::scheduleTx() {
     });
 }
 
+void Hardware::startRx() {
+    if (!enabled_) throw std::runtime_error("RX START while UART disabled");
+    if (rxActive_) throw std::runtime_error("RX START during active transfer");
+    if (rxByteNumber_ > RX_MEM_BYTES - rxOffset_)
+        throw std::out_of_range("RX offset + byte number exceeds RX MEM");
+    ++rxTransferGeneration_;
+    ++rxGeneration_;
+    rxTimer_.cancel();
+    rxScheduled_ = false;
+    rx_.clear();
+    pending_ &= ~irq::RX_EVENTS;
+    rxByteCount_ = 0;
+    rxActive_ = rxByteNumber_ != 0;
+    if (!rxActive_) latch(irq::RX_EMPTY);
+}
+
+void Hardware::scheduleRx() {
+    if (!enabled_ || !rxActive_ || rx_.empty() || rxScheduled_) return;
+    rxScheduled_ = true;
+    const auto generation = rxTransferGeneration_;
+    asio::post(executor_, [this, generation] {
+        if (generation != rxTransferGeneration_) return;
+        rxScheduled_ = false;
+        if (enabled_ && rxActive_) drainRxFifo();
+    });
+}
+
+void Hardware::drainRxFifo() {
+    if (rx_.empty()) return;
+    while (!rx_.empty()) {
+        const auto offset = rxOffset_ + rxByteCount_;
+        const auto shift = 8 * (offset % 4);
+        auto &word = rxMemory_[offset / 4];
+        word = (word & ~(0xffu << shift)) |
+               (static_cast<std::uint32_t>(static_cast<unsigned char>(rx_.front())) << shift);
+        rx_.pop_front();
+        ++rxByteCount_; // Count only bytes committed to memory, not FIFO arrivals.
+    }
+    if (rxByteCount_ == rxByteNumber_) {
+        rxActive_ = false;
+        ++rxGeneration_;
+        rxTimer_.cancel();
+    }
+    latch(irq::RX_EMPTY); // Intermediate drains are not transfer completion.
+}
+
 bool Hardware::injectRx(char byte) {
-    if (!enabled_ || rx_.size() == FIFO_CAPACITY) return false;
-    if (rxByteNumber_ != 0 && rxByteCount_ >= rxByteNumber_) return false;
-    const bool wasEmpty = rx_.empty();
+    if (!enabled_ || !rxActive_) return false;
+    if (rx_.size() == FIFO_CAPACITY) { latch(irq::RX_ERROR); return false; }
+    if (rxByteCount_ + rx_.size() >= rxByteNumber_) return false;
     rx_.push_back(byte);
-    ++rxByteCount_;
-    // A later target-reaching IRQ is needed even if software acknowledged the
-    // initial RX_READY and left the partial payload in the FIFO.
-    if (wasEmpty || (rxByteNumber_ != 0 && rxByteCount_ == rxByteNumber_)) latch(irq::RX_READY);
     if (rx_.size() == FIFO_CAPACITY) latch(irq::RX_FULL);
+    scheduleRx();
     restartRxTimeout();
+    return true;
+}
+
+bool Hardware::injectRxErrors(std::uint32_t errors) {
+    if (errors & ~(irq::RX_ERROR | irq::FRAME_ERROR))
+        throw std::invalid_argument("Only RX_ERROR and FRAME_ERROR may be injected");
+    if (!enabled_) return false;
+    latch(errors);
     return true;
 }
 
 void Hardware::restartRxTimeout() {
     const auto generation = ++rxGeneration_;
     rxTimer_.cancel();
-    if (!enabled_ || rx_.empty() || rxTimeoutMs_ == 0) return;
-    if (rxByteNumber_ != 0 && rxByteCount_ == rxByteNumber_) return;
+    if (!enabled_ || !rxActive_ || rxTimeoutMs_ == 0 ||
+        (rxByteCount_ == 0 && rx_.empty())) return;
     rxTimer_.expires_after(std::chrono::milliseconds(rxTimeoutMs_));
     rxTimer_.async_wait([this, generation](boost::system::error_code ec) {
-        if (!ec && generation == rxGeneration_ && !rx_.empty()) latch(irq::RX_TIMEOUT);
+        if (ec || generation != rxGeneration_ || !enabled_ || !rxActive_) return;
+        drainRxFifo(); // Commit any staging bytes before freezing the snapshot.
+        if (!rxActive_) return; // Full count wins over an expiry at the same time.
+        rxActive_ = false;
+        ++rxTransferGeneration_;
+        rxScheduled_ = false;
+        latch(irq::RX_TIMEOUT);
     });
 }
 
@@ -227,7 +301,7 @@ void Hardware::queueInterrupt() {
 }
 
 void Hardware::reset() {
-    ++txGeneration_; ++rxGeneration_;
+    ++txGeneration_; ++rxGeneration_; ++rxTransferGeneration_;
     txTimer_.cancel(); rxTimer_.cancel();
     txScheduled_ = false;
     enabled_ = false;
@@ -239,7 +313,9 @@ void Hardware::reset() {
     txShift_.reset();
     txMemory_.fill(0);
     txOffset_ = txByteNumber_ = txByteCount_ = 0;
-    rxByteNumber_ = rxByteCount_ = 0;
+    rxMemory_.fill(0);
+    rxOffset_ = rxByteNumber_ = rxByteCount_ = 0;
+    rxActive_ = rxScheduled_ = false;
     txActive_ = false;
     // transmitted_ is test-bench history, not a hardware register.
 }

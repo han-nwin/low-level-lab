@@ -13,40 +13,50 @@ namespace asio = boost::asio;
 
 // Fictional UART register offsets. See README.md for read/write semantics.
 enum class Reg : std::uint32_t {
-    CONTROL_0 = 0x00, // Live status/control + CLEAR command
+    CONTROL_0 = 0x00, // Live FIFO status, enable, and reset
     CONTROL_1 = 0x04, // Packed baud divisor, 7-bit IRQ mask, and framing
-    RX_DATA = 0x0c,
+    IRQ_STATUS = 0x08, // Read-only latched sources, bits [6:0]
+    IRQ_CLEAR = 0x10, // Write-one-to-clear sources, bits [6:0]; reads zero
     RX_TIMEOUT_MS = 0x14,
     TX_OFFSET = 0x18,      // Byte offset into TX MEM
     TX_BYTE_NUMBER = 0x1c, // Number of bytes to send
     TX_BYTE_COUNT = 0x20,  // Read-only: bytes consumed from TX MEM into FIFO
     TX_COMMAND = 0x24,     // Write txcommand::START to begin
-    RX_BYTE_NUMBER = 0x28, // Write requested length (1..16) to arm; 0 = streaming
-    RX_BYTE_COUNT = 0x2c,  // Read-only cumulative arrivals since arming/reset
+    RX_BYTE_NUMBER = 0x28, // Requested RX transfer length, 0..RX_MEM_BYTES
+    RX_BYTE_COUNT = 0x2c,  // Read-only bytes committed to RX memory since START
+    RX_OFFSET = 0x30,    // Byte offset into RX memory
+    RX_COMMAND = 0x34,   // Write rxcommand::START to arm the transfer
+    RX_MEM_BASE = 0x200, // 64 read-only words, through 0x2fc
     TX_MEM_BASE = 0x100,   // 64 consecutive 32-bit words, through 0x1fc
 };
 namespace txcommand {
 inline constexpr std::uint32_t START = 1u << 0; // Write-one command, reads as zero
 }
+namespace rxcommand {
+inline constexpr std::uint32_t START = 1u << 0;
+}
 namespace control0 {
 inline constexpr std::uint32_t RX_EMPTY   = 1u << 0;
-inline constexpr std::uint32_t RX_FULL    = 1u << 1;
+inline constexpr std::uint32_t RX_FULL    = 1u << 1; // Live FIFO has all 16 slots occupied
 inline constexpr std::uint32_t TX_EMPTY   = 1u << 2;
 inline constexpr std::uint32_t TX_FULL    = 1u << 3;
-inline constexpr std::uint32_t CLEAR      = 1u << 4; // Clear all IRQ latches
 inline constexpr std::uint32_t ENABLE     = 1u << 5;
 inline constexpr std::uint32_t UART_RESET = 1u << 6;
 inline constexpr std::uint32_t RX_TIMEOUT = 1u << 7;
+inline constexpr std::uint32_t RX_BUSY    = 1u << 9; // RX transfer armed/in progress
 inline constexpr std::uint32_t TX_BUSY    = 1u << 8; // Transfer/FIFO/shift register active
 }
 // Logical interrupt sources. CONTROL_1's mask uses these bit positions.
 namespace irq {
-inline constexpr std::uint32_t RX_READY   = 1u << 0; // Empty -> nonempty OR requested length reached
-inline constexpr std::uint32_t RX_FULL    = 1u << 1;
+inline constexpr std::uint32_t RX_EMPTY   = 1u << 0; // Hardware drained staging FIFO into RX memory; also zero-length START
+inline constexpr std::uint32_t RX_FULL    = 1u << 1; // RX staging FIFO becomes full
 inline constexpr std::uint32_t TX_EMPTY   = 1u << 2; // FIFO drains; check transfer count!
 inline constexpr std::uint32_t TX_FULL    = 1u << 3;
+inline constexpr std::uint32_t RX_ERROR   = 1u << 4; // RX FIFO overrun or injected receive error
+inline constexpr std::uint32_t FRAME_ERROR = 1u << 5; // Test-bench injected framing error
 inline constexpr std::uint32_t RX_TIMEOUT = 1u << 6;
-inline constexpr std::uint32_t ALL = RX_READY | RX_FULL | TX_EMPTY | TX_FULL | RX_TIMEOUT;
+inline constexpr std::uint32_t ALL = 0x7fu;
+inline constexpr std::uint32_t RX_EVENTS = RX_EMPTY | RX_FULL | RX_ERROR | FRAME_ERROR | RX_TIMEOUT;
 }
 
 // Lab-defined layout, not a claim about your board's register map.
@@ -76,6 +86,8 @@ class Hardware {
     static constexpr std::size_t FIFO_CAPACITY = 16;
     static constexpr std::size_t TX_MEM_WORDS = 64;
     static constexpr std::size_t TX_MEM_BYTES = TX_MEM_WORDS * 4;
+    static constexpr std::size_t RX_MEM_WORDS = 64;
+    static constexpr std::size_t RX_MEM_BYTES = RX_MEM_WORDS * 4;
     explicit Hardware(asio::any_io_executor executor);
     std::uint32_t read(Reg reg);
     void write(Reg reg, std::uint32_t value);
@@ -102,16 +114,21 @@ class Hardware {
     TxMemoryWord getTxMemory(std::size_t index);
     // Use read/write(txMemWord(i), value) for 32-bit register access instead.
     static Reg txMemWord(std::size_t index);
+    static Reg rxMemWord(std::size_t index); // Read-only packed RX memory
     void registerInterruptHandler(std::function<void()> handler);
 
     // Test-bench interface; do not use these in your Uart implementation.
     bool injectRx(char byte);
+    bool injectRxErrors(std::uint32_t errors); // RX_ERROR / FRAME_ERROR only
     const std::string &transmitted() const { return transmitted_; }
 
   private:
     void scheduleTx();
     void startTx();
     void refillTxFifo();
+    void startRx();
+    void scheduleRx();
+    void drainRxFifo();
     void restartRxTimeout();
     void latch(std::uint32_t bits);
     void queueInterrupt();
@@ -122,7 +139,10 @@ class Hardware {
     std::optional<char> txShift_; // Byte currently being serialized onto the wire
     std::array<std::uint32_t, TX_MEM_WORDS> txMemory_{};
     std::uint32_t txOffset_ = 0, txByteNumber_ = 0, txByteCount_ = 0;
-    std::uint32_t rxByteNumber_ = 0, rxByteCount_ = 0;
+    std::array<std::uint32_t, RX_MEM_WORDS> rxMemory_{};
+    std::uint32_t rxOffset_ = 0, rxByteNumber_ = 0, rxByteCount_ = 0;
+    bool rxActive_ = false, rxScheduled_ = false;
+    std::uint64_t rxTransferGeneration_ = 0;
     bool txActive_ = false;
     std::string transmitted_;
     std::function<void()> interruptHandler_;

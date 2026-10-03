@@ -3,3 +3,4 @@
 -Wextra
 -Wpedantic
 -I/opt/homebrew/include
+-pthread
