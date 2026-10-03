@@ -1,4 +1,6 @@
 #include "uart.hpp"
+#include <hardware.hpp>
+#include <iostream>
 #include <ranges>
 #include <stdexcept>
 
@@ -11,9 +13,7 @@ Uart::Uart(asio::any_io_executor executor, Hardware &hw) : executor_(executor), 
     // Enable Uart
     hw_.write(Reg::CONTROL_0, control0::ENABLE);
 
-    // Reset leaves CONTROL_1 masked. TODO 2 unmasks the event being awaited
-    // after saving its completion handler.
-    hw_.write(Reg::CONTROL_1, irq::ALL); // turn on all interrupt
+    // Don't enable interrupt here yet
 }
 
 Uart::~Uart() { hw_.write(Reg::CONTROL_1, 0); }
@@ -33,12 +33,13 @@ asio::awaitable<void> Uart::send(std::span<const std::uint8_t> bytes) {
         throw std::length_error("bytes are too big, limit to 64*4 bytes");
     }
 
-    // Set offset to 0
+    // 1. Set offset to 0
     hw_.write(Reg::TX_OFFSET, 0);
 
-    // Set num of bytes we about to send
+    // 2. Set num of bytes we about to send
     hw_.write(Reg::TX_BYTE_NUMBER, static_cast<std::uint32_t>(bytes.size()));
 
+    // 3. Write to tx mem
     // TX MEM has 64 words, each holding four bytes:
     // bits [31:24] [23:16] [15:8] [7:0]
     //      byte 3  byte 2  byte 1 byte 0 (first byte sent)
@@ -60,7 +61,7 @@ asio::awaitable<void> Uart::send(std::span<const std::uint8_t> bytes) {
         const size_t bytePos = idx % 4; // byte position within this word
 
         // little endian
-        word |= static_cast<uint32_t>(bytes[idx] << 8 * bytePos);
+        word |= static_cast<uint32_t>(bytes[idx]) << (8 * bytePos);
 
         // write if it's the last position of the word, or end of bytes array
         if (bytePos == 3 || idx + 1 == bytes.size()) {
@@ -69,7 +70,27 @@ asio::awaitable<void> Uart::send(std::span<const std::uint8_t> bytes) {
         }
     }
 
+    // 4. trigger the send
+    hw_.write(Reg::TX_COMMAND, txcommand::START);
+
+    std::cout << "Tx send command triggered! Suspend until interrupt + conditions are met" << std::endl;
+    // Hardware start sending here .... //
+    // suspend until FIFO is empty
+    co_await asyncWait(irq::TX_EMPTY, asio::use_awaitable);
+
+    std::cout << "Harware interrupt, conditions are met. ALL Bytes sent" << std::endl;
+
     co_return;
+}
+
+void Uart::startWait(std::uint32_t event, Handler handler) {
+    pendingHandler_ = std::move(handler);
+    waitingFor_ = event;
+
+    // Enale interrupt
+    hw_.write(Reg::CONTROL_1, irq::ALL);
+
+    // Checking completion condition
 }
 
 void Uart::handleInterrupt() {

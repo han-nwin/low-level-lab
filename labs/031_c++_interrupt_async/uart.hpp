@@ -1,9 +1,9 @@
 #pragma once
 #include "hardware.hpp"
 #include <boost/asio/any_completion_handler.hpp>
-#include <stdexcept>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 
 // YOUR EXERCISE. Implement this header's template and uart.cxx.
 // One send OR receive at a time; outgoing messages fit in 256-byte TX MEM.
@@ -23,11 +23,12 @@ class Uart {
   private:
     using Handler = asio::any_completion_handler<void(boost::system::error_code)>;
 
+    void startWait(std::uint32_t event, Handler handler);
+
     // event is irq::TX_EMPTY or irq::RX_READY. A TX wait means FIFO empty AND
     // TX_BYTE_COUNT == TX_BYTE_NUMBER (memory consumed, not wire idle).
-    template <typename CompletionToken>
-    auto asyncWait(std::uint32_t event, CompletionToken &&token) {
-        // TODO 2: replace this stub with:
+    template <typename CompletionToken> auto asyncWait(std::uint32_t event, CompletionToken &&token) {
+        // TODO 2:
         // return asio::async_initiate<CompletionToken,
         //                            void(boost::system::error_code)>(
         //     YOUR_INITIATION_LAMBDA, token);
@@ -36,14 +37,16 @@ class Uart {
         // Store the handler before enabling its interrupt mask.
         // Check the ready condition too: for TX, require live TX_EMPTY AND
         // TX_BYTE_COUNT == TX_BYTE_NUMBER. Intermediate FIFO-empty is not done.
-        (void)event;
-        (void)token;
-        return notImplemented();
+
+        return asio::async_initiate<CompletionToken, void(boost::system::error_code)>(
+            [this, event](auto handler) { startWait(event, Handler(std::move(handler))); }, token);
     }
+
     static asio::awaitable<void> notImplemented() {
         throw std::logic_error("TODO 2: implement asyncWait() in uart.hpp");
         co_return;
     }
+
     void completeWait(boost::system::error_code ec);
     asio::any_io_executor executor_;
     Hardware &hw_;
