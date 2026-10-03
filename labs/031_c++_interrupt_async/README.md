@@ -8,7 +8,17 @@ make                 # C++20 and Boost headers; defaults to /opt/homebrew
 ./uart_lab           # TX exercise; initially prints TODO and exits with code 1
 ./uart_lab --rx      # Optional RX exercise
 make test            # Tests the supplied hardware, independently of your TODOs
+make compare         # Compare async send with a blocking send and a middle task
 ```
+
+`make compare` sends the same 20-byte payload both ways and schedules a
+nonblocking 50 ms middle task to start 50 ms into the send. The async version
+lets that task run while `co_await` is suspended. The blocking version runs the
+simulated UART and IRQ on a hardware thread, but blocks the application thread
+until completion, so its middle task runs afterward. The summary reports when
+the middle task starts and finishes, each send wait, and total time until both
+are done. Async overlaps the task with the transfer; it does not make UART
+transmission faster.
 
 Override the include prefix if needed: `make BOOST_PREFIX=/usr/local`.
 The installed Boost must provide `boost/asio/any_completion_handler.hpp`.

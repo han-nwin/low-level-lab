@@ -4,7 +4,7 @@
 #include <ranges>
 #include <stdexcept>
 
-Uart::Uart(asio::any_io_executor executor, Hardware &hw) : executor_(executor), hw_(hw) {
+Uart::Uart(asio::any_io_executor executor, Hardware &hw) : hw_(hw), executor_(executor) {
     // TODO 1: reset and enable UART. Main owns interrupt-vector wiring.
 
     // Reset Uart
