@@ -17,10 +17,12 @@ std::uint32_t Hardware::read(Reg reg) {
                (txFifo_.empty() ? control0::TX_EMPTY : 0u) |
                (txFifo_.size() == FIFO_CAPACITY ? control0::TX_FULL : 0u) |
                (txActive_ || txShift_ ? control0::TX_BUSY : 0u) |
-               (enabled_ ? control0::ENABLE : 0u) | (pending_ & irq::RX_TIMEOUT);
-    case Reg::CONTROL_1: return mask_;
-    case Reg::IRQ_STATUS: return pending_;
+               (enabled_ ? control0::ENABLE : 0u) |
+               ((pending_ & irq::RX_TIMEOUT) ? control0::RX_TIMEOUT : 0u);
+    case Reg::CONTROL_1: return control1_;
     case Reg::RX_TIMEOUT_MS: return rxTimeoutMs_;
+    case Reg::RX_BYTE_NUMBER: return rxByteNumber_;
+    case Reg::RX_BYTE_COUNT: return rxByteCount_;
     case Reg::RX_DATA: {
         if (rx_.empty()) throw std::runtime_error("RX_DATA read while RX_EMPTY");
         const auto byte = static_cast<unsigned char>(rx_.front());
@@ -64,11 +66,8 @@ void Hardware::write(Reg reg, std::uint32_t value) {
         return;
     }
     case Reg::CONTROL_1:
-        mask_ = value & irq::ALL;
+        control1_ = value & control1::WRITABLE_MASK;
         queueInterrupt();
-        return;
-    case Reg::IRQ_STATUS:
-        pending_ &= ~(value & irq::ALL); // Write one to clear
         return;
     case Reg::TX_OFFSET:
     case Reg::TX_BYTE_NUMBER:
@@ -87,6 +86,16 @@ void Hardware::write(Reg reg, std::uint32_t value) {
         restartRxTimeout();
         return;
     case Reg::RX_DATA: throw std::runtime_error("RX_DATA is read-only");
+    case Reg::RX_BYTE_COUNT: throw std::runtime_error("RX_BYTE_COUNT is read-only");
+    case Reg::RX_BYTE_NUMBER:
+        if (value > FIFO_CAPACITY) throw std::out_of_range("RX length exceeds 16-byte FIFO");
+        if (!rx_.empty()) throw std::runtime_error("Drain RX_DATA before arming a new receive");
+        ++rxGeneration_;
+        rxTimer_.cancel();
+        rxByteNumber_ = value;
+        rxByteCount_ = 0;
+        pending_ &= ~(irq::RX_READY | irq::RX_FULL | irq::RX_TIMEOUT);
+        return;
     }
     throw std::runtime_error("Unknown register");
 }
@@ -177,9 +186,13 @@ void Hardware::scheduleTx() {
 
 bool Hardware::injectRx(char byte) {
     if (!enabled_ || rx_.size() == FIFO_CAPACITY) return false;
+    if (rxByteNumber_ != 0 && rxByteCount_ >= rxByteNumber_) return false;
     const bool wasEmpty = rx_.empty();
     rx_.push_back(byte);
-    if (wasEmpty) latch(irq::RX_READY);
+    ++rxByteCount_;
+    // A later target-reaching IRQ is needed even if software acknowledged the
+    // initial RX_READY and left the partial payload in the FIFO.
+    if (wasEmpty || (rxByteNumber_ != 0 && rxByteCount_ == rxByteNumber_)) latch(irq::RX_READY);
     if (rx_.size() == FIFO_CAPACITY) latch(irq::RX_FULL);
     restartRxTimeout();
     return true;
@@ -189,6 +202,7 @@ void Hardware::restartRxTimeout() {
     const auto generation = ++rxGeneration_;
     rxTimer_.cancel();
     if (!enabled_ || rx_.empty() || rxTimeoutMs_ == 0) return;
+    if (rxByteNumber_ != 0 && rxByteCount_ == rxByteNumber_) return;
     rxTimer_.expires_after(std::chrono::milliseconds(rxTimeoutMs_));
     rxTimer_.async_wait([this, generation](boost::system::error_code ec) {
         if (!ec && generation == rxGeneration_ && !rx_.empty()) latch(irq::RX_TIMEOUT);
@@ -201,12 +215,12 @@ void Hardware::latch(std::uint32_t bits) {
 }
 
 void Hardware::queueInterrupt() {
-    if (!enabled_ || irqQueued_ || !(pending_ & mask_) || !interruptHandler_) return;
+    if (!enabled_ || irqQueued_ || !(pending_ & control1::irqMask(control1_)) || !interruptHandler_) return;
     irqQueued_ = true;
     asio::post(executor_, [this] {
         irqQueued_ = false;
-        if (!enabled_ || !(pending_ & mask_) || !interruptHandler_) return;
-        std::cout << "[hw] IRQ, active bits = " << (pending_ & mask_) << '\n';
+        if (!enabled_ || !(pending_ & control1::irqMask(control1_)) || !interruptHandler_) return;
+        std::cout << "[hw] IRQ, active bits = " << (pending_ & control1::irqMask(control1_)) << '\n';
         interruptHandler_();
         queueInterrupt(); // Remains asserted until acknowledged or masked
     });
@@ -217,13 +231,15 @@ void Hardware::reset() {
     txTimer_.cancel(); rxTimer_.cancel();
     txScheduled_ = false;
     enabled_ = false;
-    mask_ = pending_ = 0;
+    control1_ = control1::RESET_VALUE;
+    pending_ = 0;
     rxTimeoutMs_ = 100;
     rx_.clear();
     txFifo_.clear();
     txShift_.reset();
     txMemory_.fill(0);
     txOffset_ = txByteNumber_ = txByteCount_ = 0;
+    rxByteNumber_ = rxByteCount_ = 0;
     txActive_ = false;
     // transmitted_ is test-bench history, not a hardware register.
 }

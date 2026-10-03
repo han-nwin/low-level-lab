@@ -16,7 +16,11 @@ Uart::Uart(asio::any_io_executor executor, Hardware &hw) : executor_(executor), 
     // Don't enable interrupt here yet
 }
 
-Uart::~Uart() { hw_.write(Reg::CONTROL_1, 0); }
+// Destructor, reset control register
+Uart::~Uart() {
+    const auto config = hw_.read(Reg::CONTROL_1);
+    hw_.write(Reg::CONTROL_1, config & ~control1::IRQ_MASK);
+}
 
 asio::awaitable<void> Uart::send(std::span<const std::uint8_t> bytes) {
     // TODO 3: enforce bytes.size() <= Hardware::TX_MEM_BYTES.
@@ -75,40 +79,95 @@ asio::awaitable<void> Uart::send(std::span<const std::uint8_t> bytes) {
 
     std::cout << "Tx send command triggered! Suspend until interrupt + conditions are met" << std::endl;
     // Hardware start sending here .... //
-    // suspend until FIFO is empty
-    co_await asyncWait(irq::TX_EMPTY, asio::use_awaitable);
+    // suspend..
+    co_await asyncWait(EventType::TX, asio::use_awaitable); // use_awaitable is a completion token
 
     std::cout << "Harware interrupt, conditions are met. ALL Bytes sent" << std::endl;
 
     co_return;
 }
 
-void Uart::startWait(std::uint32_t event, Handler handler) {
-    pendingHandler_ = std::move(handler);
-    waitingFor_ = event;
-
-    // Enale interrupt
-    hw_.write(Reg::CONTROL_1, irq::ALL);
-
-    // Checking completion condition
-}
-
 void Uart::handleInterrupt() {
-    // TODO 4a: read IRQ_STATUS and CONTROL_1. Is your awaited event active?
-    // Acknowledge each active event with a write-one-to-clear write.
+    // TODO 4a: read live status from CONTROL_0 and the mask from CONTROL_1.
+    // CONTROL_0's low status bits are not a pending-IRQ bitmap.
     // TX_EMPTY: only completeWait when TX_BYTE_COUNT == TX_BYTE_NUMBER AND
     // live TX_EMPTY is set. Otherwise keep the handler and interrupt enabled:
     // hardware will refill its FIFO and interrupt again when it drains.
     // RX_READY: complete the receive wait as before.
-    (void)waitingFor_;
+
+    // Read live CONTROL_0 status and map conditions to logical IRQ sources.
+    const auto status = hw_.read(Reg::CONTROL_0);
+    const auto mask = control1::irqMask(hw_.read(Reg::CONTROL_1));
+
+    std::uint32_t active = 0;
+    if (!(status & control0::RX_EMPTY))
+        active |= irq::RX_READY;
+    if (status & control0::RX_FULL)
+        active |= irq::RX_FULL;
+    if (status & control0::TX_EMPTY)
+        active |= irq::TX_EMPTY;
+    if (status & control0::TX_FULL)
+        active |= irq::TX_FULL;
+    if (status & control0::RX_TIMEOUT)
+        active |= irq::RX_TIMEOUT;
+
+    // get what needed to be active
+    active &= mask;
+
+    // TX Empty
+    if (event_ == EventType::TX && (active & irq::TX_EMPTY)) {
+        // CLEAR acknowledges pending notifications; live status remains set.
+        hw_.write(Reg::CONTROL_0, control0::ENABLE | control0::CLEAR);
+
+        // If Tx fifo empty and conditions are met (byte count = num bytes)
+        if ((hw_.read(Reg::CONTROL_0) & control0::TX_EMPTY) &&
+            (hw_.read(Reg::TX_BYTE_COUNT) == hw_.read(Reg::TX_BYTE_NUMBER))) {
+
+            completeWait({});
+            return;
+        }
+    }
+
+    // RX full
+    if (event_ == EventType::RX && (active & irq::RX_READY)) {
+        hw_.write(Reg::CONTROL_0, control0::ENABLE | control0::CLEAR);
+
+        completeWait({});
+        return;
+    }
+
+    // RX timeout error
+    if (event_ == EventType::RX && (active & irq::RX_TIMEOUT)) {
+        hw_.write(Reg::CONTROL_0, control0::ENABLE | control0::CLEAR);
+
+        completeWait(boost::system::errc::make_error_code(boost::system::errc::io_error));
+        return;
+    }
+
+    return;
 }
 
 void Uart::completeWait(boost::system::error_code ec) {
     // TODO 4b: mask the awaited interrupt; clear its stale latch even on the
     // already-ready path. Move the saved handler out and clear waitingFor_.
     // Post a lambda to executor_ that invokes the moved handler with ec.
-    // If no handler is pending, don't complete anything.
-    (void)ec;
+    // If no handler is pending, don't complete anything
+
+    // 1. mask to disable interrupt if event is tx
+    if (event_ == EventType::TX) {
+
+        // disable
+        const auto config = hw_.read(Reg::CONTROL_1);
+        const auto mask = control1::irqMask(config) & ~irq::TX_EMPTY;
+        hw_.write(Reg::CONTROL_1, (config & ~control1::IRQ_MASK) | (mask << control1::IRQ_SHIFT));
+        event_ = EventType::NONE;
+    }
+
+    // 2. post the handler back to executor runnable queue, then execute it
+    // executor will schedule and execute it
+    if (!pendingHandler_) // this ensure we only post 1
+        return;
+    asio::post(executor_, [handler = std::move(pendingHandler_), ec]() mutable { handler(ec); });
 }
 
 asio::awaitable<char> Uart::receive() {

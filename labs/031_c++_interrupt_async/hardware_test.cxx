@@ -7,35 +7,64 @@
 int main() {
     asio::io_context io;
     Hardware hw(io.get_executor());
+    const auto setInterrupts = [&](std::uint32_t events) {
+        const auto config = hw.read(Reg::CONTROL_1);
+        hw.write(Reg::CONTROL_1,
+                 (config & ~control1::IRQ_MASK) | ((events & 0x7fu) << control1::IRQ_SHIFT));
+    };
     int interrupts = 0;
     std::uint32_t observed = 0;
+    const auto statusEvents = [&](std::uint32_t status) {
+        std::uint32_t events = 0;
+        if (!(status & control0::RX_EMPTY)) events |= irq::RX_READY;
+        if (status & control0::RX_FULL) events |= irq::RX_FULL;
+        if (status & control0::TX_EMPTY) events |= irq::TX_EMPTY;
+        if (status & control0::TX_FULL) events |= irq::TX_FULL;
+        if (status & control0::RX_TIMEOUT) events |= irq::RX_TIMEOUT;
+        return events;
+    };
     std::vector<std::uint32_t> emptyCounts;
     std::vector<std::size_t> wireCounts;
     std::vector<bool> busyAtEmpty;
     hw.registerInterruptHandler([&] {
         ++interrupts;
-        const auto active = hw.read(Reg::IRQ_STATUS) & hw.read(Reg::CONTROL_1);
+        const auto status = hw.read(Reg::CONTROL_0);
+        const auto active = statusEvents(status) & control1::irqMask(hw.read(Reg::CONTROL_1));
         observed |= active;
         if (active & irq::TX_EMPTY) {
             emptyCounts.push_back(hw.read(Reg::TX_BYTE_COUNT));
             wireCounts.push_back(hw.transmitted().size());
             busyAtEmpty.push_back((hw.read(Reg::CONTROL_0) & control0::TX_BUSY) != 0);
         }
-        hw.write(Reg::IRQ_STATUS, active);
+        hw.write(Reg::CONTROL_0, control0::ENABLE | control0::CLEAR);
     });
     const auto drain = [&] { io.restart(); io.run(); };
 
     assert(hw.read(Reg::CONTROL_0) == (control0::RX_EMPTY | control0::TX_EMPTY));
-    assert(hw.read(Reg::IRQ_STATUS) == 0);
     assert(!hw.injectRx('x'));
     const auto rejects = [](auto action) {
         bool rejected = false;
         try { action(); } catch (const std::exception &) { rejected = true; }
         assert(rejected);
     };
+    rejects([&] { hw.read(static_cast<Reg>(0x08)); });
+    rejects([&] { hw.write(static_cast<Reg>(0x08), 0); });
     rejects([&] { hw.write(Reg::TX_COMMAND, txcommand::START); });
     hw.write(Reg::CONTROL_0, control0::ENABLE);
     hw.write(Reg::RX_TIMEOUT_MS, 0);
+
+    // Packed field isolation: baud/framing cannot accidentally enable IRQs.
+    const auto serialConfig = 0x3456u | control1::DATA_BITS_8 |
+        control1::PARITY_ENABLE | control1::PARITY_ODD | control1::TWO_STOP_BITS;
+    hw.write(Reg::CONTROL_1, serialConfig);
+    assert(control1::irqMask(hw.read(Reg::CONTROL_1)) == 0);
+    setInterrupts(irq::TX_EMPTY | irq::RX_TIMEOUT);
+    assert(control1::irqMask(hw.read(Reg::CONTROL_1)) == (irq::TX_EMPTY | irq::RX_TIMEOUT));
+    assert((hw.read(Reg::CONTROL_1) & ~control1::IRQ_MASK) == serialConfig);
+    setInterrupts(0);
+    assert(hw.read(Reg::CONTROL_1) == serialConfig);
+    hw.write(Reg::CONTROL_1, serialConfig | 0xf0000000u);
+    assert(hw.read(Reg::CONTROL_1) == serialConfig); // Reserved high bits ignored
 
     // Configure offset and length BEFORE writing payload. No step starts TX.
     hw.write(Reg::TX_OFFSET, 3);
@@ -52,7 +81,6 @@ int main() {
     assert(hw.transmitted().empty());
     assert(hw.read(Reg::TX_BYTE_COUNT) == 0);
     assert(hw.read(Reg::CONTROL_0) & control0::TX_EMPTY);
-    assert(hw.read(Reg::IRQ_STATUS) == 0);
     hw.write(Reg::TX_COMMAND, 0); // Zero does not start TX either
     drain();
     assert(hw.transmitted().empty());
@@ -75,28 +103,27 @@ int main() {
     assert(hw.read(Reg::TX_BYTE_COUNT) == 5);
     assert(hw.read(Reg::TX_OFFSET) == 3);
     assert(interrupts == 0); // Masked events still latch
-    assert(hw.read(Reg::IRQ_STATUS) & irq::TX_EMPTY);
-    hw.write(Reg::IRQ_STATUS, 0);
-    assert(hw.read(Reg::IRQ_STATUS) & irq::TX_EMPTY);
-    hw.write(Reg::CONTROL_1, irq::TX_EMPTY);
+    assert(hw.read(Reg::CONTROL_0) & control0::TX_EMPTY);
+    setInterrupts(irq::TX_EMPTY);
     drain();
     assert(interrupts == 1 && observed == irq::TX_EMPTY);
-    assert(hw.read(Reg::IRQ_STATUS) == 0);
 
     for (std::size_t i = 0; i < Hardware::FIFO_CAPACITY; ++i) assert(hw.injectRx('R'));
     assert(!hw.injectRx('!'));
     assert(hw.read(Reg::CONTROL_0) & control0::RX_FULL);
-    assert((hw.read(Reg::IRQ_STATUS) & (irq::RX_READY | irq::RX_FULL)) ==
+    assert((statusEvents(hw.read(Reg::CONTROL_0)) & (irq::RX_READY | irq::RX_FULL)) ==
            (irq::RX_READY | irq::RX_FULL));
-    hw.write(Reg::IRQ_STATUS, irq::RX_READY);
-    assert(hw.read(Reg::IRQ_STATUS) == irq::RX_FULL);
+    // CLEAR acknowledges simulator notifications without changing live FIFO
+    // state, peripheral enable, or CONTROL_1 configuration.
+    assert(hw.read(Reg::CONTROL_0) & control0::RX_FULL);
+    assert(hw.read(Reg::CONTROL_0) & control0::ENABLE);
+    assert((hw.read(Reg::CONTROL_1) & ~control1::IRQ_MASK) == serialConfig);
     hw.write(Reg::CONTROL_0, control0::ENABLE | control0::CLEAR);
-    assert(hw.read(Reg::IRQ_STATUS) == 0);
     assert(hw.read(Reg::CONTROL_0) & control0::RX_FULL); // CLEAR preserves FIFO
     for (std::size_t i = 0; i < Hardware::FIFO_CAPACITY; ++i) assert(hw.read(Reg::RX_DATA) == 'R');
     assert(hw.read(Reg::CONTROL_0) & control0::RX_EMPTY);
 
-    hw.write(Reg::CONTROL_1, irq::RX_TIMEOUT);
+    setInterrupts(irq::RX_TIMEOUT);
     hw.write(Reg::RX_TIMEOUT_MS, 1);
     assert(hw.injectRx('T'));
     drain();
@@ -104,7 +131,7 @@ int main() {
     assert(!(hw.read(Reg::CONTROL_0) & control0::RX_TIMEOUT));
     assert(hw.read(Reg::RX_DATA) == 'T');
 
-    hw.write(Reg::CONTROL_1, 0);
+    setInterrupts(0);
     // Pause/resume a started transfer. Staging alone never transmits.
     hw.write(Reg::TX_OFFSET, 0);
     hw.write(Reg::TX_BYTE_NUMBER, 1);
@@ -129,7 +156,6 @@ int main() {
     hw.write(Reg::TX_BYTE_NUMBER, 1);
     txMem[63].setTxMem(0x5a000000u);
     hw.write(Reg::TX_COMMAND, txcommand::START);
-    assert(!(hw.read(Reg::IRQ_STATUS) & irq::TX_EMPTY)); // START cleared stale latch
     drain();
     assert(hw.transmitted() == "helloXZ");
 
@@ -138,7 +164,7 @@ int main() {
     hw.write(Reg::TX_COMMAND, txcommand::START);
     drain();
     assert(hw.read(Reg::TX_BYTE_COUNT) == 0);
-    assert(hw.read(Reg::IRQ_STATUS) & irq::TX_EMPTY);
+    assert(hw.read(Reg::CONTROL_0) & control0::TX_EMPTY);
     assert(hw.transmitted() == "helloXZ");
 
     // Full-size transfer and progress; the final byte of the window is valid.
@@ -167,7 +193,7 @@ int main() {
     drain();
     assert(hw.transmitted() == "helloXZ" + std::string(256, 'a') + "B");
     assert(hw.read(Reg::TX_BYTE_COUNT) == 1);
-    assert(hw.read(Reg::CONTROL_1) == 0);
+    assert(hw.read(Reg::CONTROL_1) == control1::RESET_VALUE);
     assert(hw.read(Reg::RX_TIMEOUT_MS) == 100);
     // 100-byte transfer through a 16-byte FIFO: six intermediate empty IRQs.
     const auto wireBefore = hw.transmitted().size();
@@ -178,7 +204,7 @@ int main() {
     hw.write(Reg::TX_COMMAND, txcommand::START);
     assert(hw.read(Reg::TX_BYTE_COUNT) == 16); // Memory consumed, not bytes on wire
     assert(hw.transmitted().size() == wireBefore);
-    hw.write(Reg::CONTROL_1, irq::TX_EMPTY);
+    setInterrupts(irq::TX_EMPTY);
     drain();
     assert((emptyCounts == std::vector<std::uint32_t>{16, 32, 48, 64, 80, 96, 100}));
     for (std::size_t i = 0; i < emptyCounts.size(); ++i) {
@@ -188,5 +214,59 @@ int main() {
     assert(hw.transmitted().substr(wireBefore) == std::string(100, 'q'));
     assert(!(hw.read(Reg::CONTROL_0) & control0::TX_BUSY));
     assert(hw.read(Reg::CONTROL_0) & control0::TX_EMPTY);
+    // Requested-length RX: completion at five bytes does NOT require RX_FULL.
+    setInterrupts(irq::RX_READY | irq::RX_TIMEOUT);
+    hw.write(Reg::RX_TIMEOUT_MS, 0);
+    hw.write(Reg::RX_BYTE_NUMBER, 5);
+    assert(hw.read(Reg::RX_BYTE_COUNT) == 0);
+    const auto beforeRx = interrupts;
+    assert(hw.injectRx('a'));
+    drain(); // Acknowledge initial RX_READY while only 1/5 bytes has arrived
+    assert(interrupts == beforeRx + 1);
+    assert(hw.read(Reg::RX_BYTE_COUNT) == 1);
+    for (char byte : std::string("bcd")) assert(hw.injectRx(byte));
+    drain();
+    assert(interrupts == beforeRx + 1);
+    assert(hw.injectRx('e'));
+    drain(); // Must notify again when target reached, without an empty transition
+    assert(interrupts == beforeRx + 2);
+    assert(hw.read(Reg::RX_BYTE_COUNT) == hw.read(Reg::RX_BYTE_NUMBER));
+    assert(!(hw.read(Reg::CONTROL_0) & control0::RX_FULL));
+    assert(!hw.injectRx('!')); // Exact-length capture stops accepting until rearmed
+    rejects([&] { hw.write(Reg::RX_BYTE_NUMBER, 1); });
+    for (char byte : std::string("abcde")) assert(hw.read(Reg::RX_DATA) == unsigned(byte));
+    assert(hw.read(Reg::RX_BYTE_COUNT) == 5); // Reading FIFO does not decrement count
+    rejects([&] { hw.write(Reg::RX_BYTE_COUNT, 0); });
+    rejects([&] { hw.write(Reg::RX_BYTE_NUMBER, 17); });
+
+    // Partial RX times out with its count intact; rearming clears old status.
+    setInterrupts(0);
+    hw.write(Reg::RX_BYTE_NUMBER, 3);
+    hw.write(Reg::RX_TIMEOUT_MS, 1);
+    observed = 0;
+    assert(hw.injectRx('p'));
+    drain();
+    assert(hw.read(Reg::CONTROL_0) & control0::RX_TIMEOUT);
+    setInterrupts(irq::RX_READY | irq::RX_TIMEOUT);
+    drain();
+    assert(observed & irq::RX_TIMEOUT);
+    assert(!(hw.read(Reg::CONTROL_0) & control0::RX_TIMEOUT));
+    assert(hw.read(Reg::RX_BYTE_COUNT) == 1);
+    assert(hw.read(Reg::RX_DATA) == 'p');
+    hw.write(Reg::RX_BYTE_NUMBER, 1);
+    observed = 0;
+    assert(hw.injectRx('r'));
+    drain();
+    assert(observed & irq::RX_READY);
+    assert(!(observed & irq::RX_TIMEOUT)); // Completed capture cancels timeout
+    assert(hw.read(Reg::RX_DATA) == 'r');
+    hw.write(Reg::RX_BYTE_NUMBER, 16);
+    for (int i = 0; i < 16; ++i) assert(hw.injectRx('f'));
+    assert(hw.read(Reg::CONTROL_0) & control0::RX_FULL);
+    assert(hw.read(Reg::RX_BYTE_COUNT) == 16);
+    hw.write(Reg::CONTROL_0, control0::UART_RESET);
+    drain();
+    assert(hw.read(Reg::RX_BYTE_COUNT) == 0);
+    assert(hw.read(Reg::RX_BYTE_NUMBER) == 0);
     std::cout << "Hardware tests PASS\n";
 }

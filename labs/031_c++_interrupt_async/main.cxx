@@ -119,7 +119,7 @@ int main(int argc, char **argv) {
     }
 
     // Disconnect the vector before the application-owned Uart is destroyed.
-    hw.write(Reg::CONTROL_1, 0);
+    hw.write(Reg::CONTROL_1, hw.read(Reg::CONTROL_1) & ~control1::IRQ_MASK);
     hw.registerInterruptHandler({});
     uartIrqTarget = nullptr;
     return result;
