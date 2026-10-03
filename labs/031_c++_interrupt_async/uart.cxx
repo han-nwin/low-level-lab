@@ -85,7 +85,7 @@ asio::awaitable<void> Uart::send(std::span<const std::uint8_t> bytes) {
     co_return;
 }
 
-asio::awaitable<std::size_t> Uart::read(std::span<std::uint8_t> buffer) {
+asio::awaitable<std::size_t> Uart::readSome(std::span<uint8_t> buffer) {
     if (buffer.empty())
         co_return 0;
 
@@ -102,7 +102,7 @@ asio::awaitable<std::size_t> Uart::read(std::span<std::uint8_t> buffer) {
 
         // read upto requested size or whatever available
         const auto count = std::min(buffer.size(), rxSize_);
-        for (std::size_t i = 0; i < count; ++i) {
+        for (size_t i = 0; i < count; ++i) {
             buffer[i] = rxRing_[rxHead_];
             rxHead_ = (rxHead_ + 1) % RX_RING_CAPACITY;
         }
@@ -111,6 +111,44 @@ asio::awaitable<std::size_t> Uart::read(std::span<std::uint8_t> buffer) {
         readPending_ = false;
 
         co_return count;
+    } catch (...) {
+        readPending_ = false;
+        throw;
+    }
+}
+
+asio::awaitable<void> Uart::readExact(std::span<uint8_t> buffer) {
+    if (buffer.empty())
+        co_return;
+
+    if (readPending_)
+        throw std::logic_error("A UART read is already pending");
+
+    readPending_ = true;
+
+    try {
+        std::size_t total = 0;
+
+        while (total < buffer.size()) {
+
+            // Nothing buffered yet -> sleep until RX puts data in the ring.
+            if (rxSize_ == 0)
+                co_await asyncRxWait(asio::use_awaitable);
+
+            // Take as much as we currently have, but no more than we still need.
+            const auto count = std::min(buffer.size() - total, rxSize_);
+
+            for (size_t i = 0; i < count; ++i) {
+                buffer[total + i] = rxRing_[rxHead_];
+                rxHead_ = (rxHead_ + 1) % RX_RING_CAPACITY;
+            }
+
+            rxSize_ -= count;
+            total += count;
+        }
+
+        readPending_ = false;
+        co_return;
     } catch (...) {
         readPending_ = false;
         throw;
@@ -131,6 +169,8 @@ void Uart::armRxChunk() {
 void Uart::handleRxInterrupt(std::uint32_t active) {
     const auto count = hw_.read(Reg::RX_BYTE_COUNT);
     const bool stopped = !(hw_.read(Reg::CONTROL_0) & control0::RX_BUSY);
+
+    // complete means the FIFO is empty and the RX byte count matches the requested length
     const bool complete = stopped && ((active & irq::RX_TIMEOUT) || count == hw_.read(Reg::RX_BYTE_NUMBER));
     if (!complete) {
         // FIFO-empty can be an intermediate drain; do not publish bytes twice.
@@ -138,25 +178,33 @@ void Uart::handleRxInterrupt(std::uint32_t active) {
         return;
     }
 
-    // Hardware has stopped, so count and memory stay stable until START.
+    // Drain the Rx Mem to ring buffer
     for (std::size_t i = 0; i < count; ++i) {
+        const auto word = hw_.read(Hardware::rxMemWord(i / 4));
+        const auto byte = static_cast<std::uint8_t>(word >> (8 * (i % 4)));
+
+        // If full, discard the oldest unread byte to make room
+        // for the newest incoming byte.
         if (rxSize_ == RX_RING_CAPACITY) {
-            ++rxDropped_; // Keep queued bytes; drop incoming bytes when full.
-            continue;
+            rxHead_ = (rxHead_ + 1) % RX_RING_CAPACITY;
+            --rxSize_;
+            ++rxDropped_;
         }
 
-        // RX memory stores 4 bytes per 32-bit word.
-        // Read the containing word, extract byte i, then append it to the ring buffer.
-        const auto word = hw_.read(Hardware::rxMemWord(i / 4));
-        rxRing_[(rxHead_ + rxSize_) % RX_RING_CAPACITY] = static_cast<std::uint8_t>(word >> (8 * (i % 4)));
+        // Append newest byte at the logical end of the ring.
+        rxRing_[(rxHead_ + rxSize_) % RX_RING_CAPACITY] = byte;
         ++rxSize_;
     }
 
+    // Intermediate Clear the interrupt
     hw_.write(Reg::IRQ_CLEAR, irq::RX_EMPTY | irq::RX_TIMEOUT);
-    armRxChunk(); // Resume capture before posting the application wakeup.
 
+    // Resume capturing incoming bytes to rx mem before posting the application wakeup.
+    armRxChunk();
+
+    //
     if (rxSize_ > 0)
-        completeRxWait({});
+        tryCompleteRxWait({});
 }
 
 void Uart::handleInterrupt() {
@@ -199,10 +247,14 @@ void Uart::completeTxWait(boost::system::error_code ec) {
     asio::post(executor_, [handler = std::move(txHandler_), ec]() mutable { handler(ec); });
 }
 
-void Uart::completeRxWait(boost::system::error_code ec) {
+void Uart::tryCompleteRxWait(boost::system::error_code ec) {
+    // RX data was added to the ring buffer.
+    // If no handler exists, no read() is currently suspended waiting for data;
+    // leave the bytes buffered for a future read().
     if (!rxHandler_)
         return;
 
-    // Reading the ring does not disable RX; read() releases readPending_.
+    // Wake the pending read() on the executor.
+    // Background RX remains enabled and continues collecting data.
     asio::post(executor_, [handler = std::move(rxHandler_), ec]() mutable { handler(ec); });
 }

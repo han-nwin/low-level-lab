@@ -41,7 +41,15 @@ class Uart {
     // for a completed hardware chunk if empty. No application read deadline.
     // Empty buffer returns 0. Output may exceed hardware/ring capacity.
     // Only one read at a time; keep its buffer alive through the await.
-    asio::awaitable<std::size_t> read(std::span<std::uint8_t> buffer);
+    // NOTE: std::span<'not const'> can modify caller's bytes in the buffer
+    asio::awaitable<std::size_t> readSome(std::span<uint8_t> buffer);
+
+    // Read EXACTLY buffer.size() bytes.
+    // If the ring buffer does not currently contain enough data, suspend until
+    // background RX receives more. May span multiple hardware RX chunks.
+    // Only one read/readExact operation may be active at a time.
+    // NOTE: std::span<'not const'> can modify caller's bytes in the buffer
+    asio::awaitable<void> readExact(std::span<uint8_t> buffer);
 
     // Software queue diagnostics (not the hardware staging count).
     std::size_t rxBuffered() const { return rxSize_; }
@@ -49,7 +57,7 @@ class Uart {
 
     // TX masks its completed interrupt; RX wakes a reader without stopping capture.
     void completeTxWait(boost::system::error_code ec);
-    void completeRxWait(boost::system::error_code ec);
+    void tryCompleteRxWait(boost::system::error_code ec);
 
     // Called by the application's UART_IRQHandler entry point.
     void handleInterrupt();
@@ -87,8 +95,11 @@ class Uart {
             [this](auto handler) {
                 // Capture runs independently; this wait only observes the ring.
                 rxHandler_ = std::move(handler);
+
+                // Race check: data may already be buffered by the time the waiter
+                // is installed. If so, complete immediately instead of suspending.
                 if (rxSize_ > 0)
-                    completeRxWait({});
+                    tryCompleteRxWait({});
             },
             token);
     }
@@ -102,8 +113,23 @@ class Uart {
     asio::any_completion_handler<void(boost::system::error_code)> rxHandler_;
 
     std::array<std::uint8_t, RX_RING_CAPACITY> rxRing_{};
-    std::size_t rxHead_ = 0;    // Index of the next byte to read.
-    std::size_t rxSize_ = 0;    // Insert at (rxHead_ + rxSize_) % capacity.
-    std::size_t rxDropped_ = 0; // Drop NEW bytes when full; preserve queued bytes.
-    bool readPending_ = false;  // Held until the read coroutine has consumed data.
+    std::size_t rxHead_ = 0;    // Ring-buffer index of the oldest unread byte.
+    std::size_t rxSize_ = 0;    // Number of unread bytes currently stored.
+    std::size_t rxDropped_ = 0; // Oldest unread bytes overwritten when the ring was full.
+    bool readPending_ = false;  // True while one read() coroutine is active.
+    // NOTE:
+    // capacity = 4
+    // [A][B][C][D]   FULL
+    //     ↓
+    // E arrives
+    //     ↓
+    // discard A
+    //     ↓
+    // [B][C][D][E]
+    //     ↓
+    // F arrives
+    //     ↓
+    // discard B
+    //     ↓
+    // [C][D][E][F]
 };

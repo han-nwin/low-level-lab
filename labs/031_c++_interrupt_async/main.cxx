@@ -40,7 +40,8 @@ asio::awaitable<void> exercise(Uart &uart, Hardware &hw, bool receive) {
     if (receive) {
         hw.write(Reg::RX_TIMEOUT_MS, 10);
         std::vector<std::uint8_t> incoming(50);
-        for (std::size_t i = 0; i < incoming.size(); ++i) incoming[i] = static_cast<std::uint8_t>(i);
+        for (std::size_t i = 0; i < incoming.size(); ++i)
+            incoming[i] = static_cast<std::uint8_t>(i);
         std::cout << "[app] Peer sends 50 bytes before the application calls read()...\n";
         co_await injectBurst(hw, incoming);
         asio::steady_timer settle(co_await asio::this_coro::executor, 20ms);
@@ -49,13 +50,13 @@ asio::awaitable<void> exercise(Uart &uart, Hardware &hw, bool receive) {
             throw std::runtime_error("Completed hardware chunk was not queued in the ring");
 
         std::array<std::uint8_t, 10> first;
-        if (co_await uart.read(first) != 10 || !std::equal(first.begin(), first.end(), incoming.begin()) ||
+        if (co_await uart.readSome(first) != 10 || !std::equal(first.begin(), first.end(), incoming.begin()) ||
             uart.rxBuffered() != 40)
             throw std::runtime_error("read(10) must return 10 bytes and retain 40");
         std::array<std::uint8_t, 100> rest;
         rest.fill(0xa5);
-        if (co_await uart.read(rest) != 40 ||
-            !std::equal(incoming.begin() + 10, incoming.end(), rest.begin()) || rest[40] != 0xa5)
+        if (co_await uart.readSome(rest) != 40 || !std::equal(incoming.begin() + 10, incoming.end(), rest.begin()) ||
+            rest[40] != 0xa5)
             throw std::runtime_error("read(100) must return the 40 available bytes");
         std::cout << "[app] PASS: 50 queued bytes consumed as 10 + 40\n";
 
@@ -65,17 +66,18 @@ asio::awaitable<void> exercise(Uart &uart, Hardware &hw, bool receive) {
         peer.async_wait([&hw, accepted](boost::system::error_code ec) {
             if (!ec)
                 for (auto byte : {0x00, 0x80, 0xff})
-                    if (hw.injectRx(static_cast<char>(byte))) ++*accepted;
+                    if (hw.injectRx(static_cast<char>(byte)))
+                        ++*accepted;
         });
         const std::uint8_t reply[] = {'O', 'K'};
         co_await uart.send(reply);
         std::array<std::uint8_t, 8> binary{};
-        const auto count = co_await uart.read(binary);
+        const auto count = co_await uart.readSome(binary);
         if (*accepted != 3 || count != 3 || binary[0] != 0 || binary[1] != 0x80 || binary[2] != 0xff)
             throw std::runtime_error("Background RX during TX lost bytes");
         if (!(hw.read(Reg::CONTROL_0) & control0::RX_BUSY) || uart.rxDropped() != 0)
             throw std::runtime_error("RX must remain armed after read(), without drops");
-        if (co_await uart.read({}) != 0)
+        if (co_await uart.readSome({}) != 0)
             throw std::runtime_error("Empty read must return zero");
         std::cout << "[app] PASS: background binary RX during TX; receiver still armed\n";
         co_return;
@@ -148,12 +150,13 @@ int main(int argc, char **argv) {
         watchdog.cancel();
         work.reset();
         // On success let the hardware's last wire timer finish before exit.
-        if (error) io.stop();
+        if (error)
+            io.stop();
     });
     io.run();
 
-    const auto expectedWire = receive ? std::string("OK") :
-        "hello!" + std::string(100, 'x') + std::string("\x01\x00\xff", 3);
+    const auto expectedWire =
+        receive ? std::string("OK") : "hello!" + std::string(100, 'x') + std::string("\x01\x00\xff", 3);
     if (result == 0 && hw.transmitted() != expectedWire) {
         std::cerr << "[app] FAIL: wire output lost or duplicated bytes\n";
         result = 1;

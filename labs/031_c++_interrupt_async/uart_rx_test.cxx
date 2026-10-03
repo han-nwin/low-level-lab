@@ -12,11 +12,13 @@ using namespace std::chrono_literals;
 
 namespace {
 void require(bool condition, const char *message) {
-    if (!condition) throw std::runtime_error(message);
+    if (!condition)
+        throw std::runtime_error(message);
 }
 std::vector<std::uint8_t> bytes(std::size_t count, std::size_t start = 0) {
     std::vector<std::uint8_t> result(count);
-    for (std::size_t i = 0; i < count; ++i) result[i] = static_cast<std::uint8_t>(start + i);
+    for (std::size_t i = 0; i < count; ++i)
+        result[i] = static_cast<std::uint8_t>(start + i);
     return result;
 }
 struct Bench {
@@ -32,7 +34,10 @@ struct Bench {
             inInterrupt = false;
         });
     }
-    ~Bench() { hw.registerInterruptHandler({}); io.stop(); }
+    ~Bench() {
+        hw.registerInterruptHandler({});
+        io.stop();
+    }
     asio::awaitable<void> pause(std::chrono::milliseconds duration) {
         asio::steady_timer timer(io, duration);
         co_await timer.async_wait(asio::use_awaitable);
@@ -60,7 +65,7 @@ struct Bench {
         capturing();
     }
     asio::awaitable<std::size_t> read(std::span<std::uint8_t> out) {
-        const auto count = co_await uart.read(out);
+        const auto count = co_await uart.readSome(out);
         require(!inInterrupt, "reader continuation ran inside ISR instead of being posted");
         co_return count;
     }
@@ -68,10 +73,9 @@ struct Bench {
         std::vector<std::uint8_t> storage(capacity + 2, 0xa5);
         const auto count = co_await read(std::span(storage).subspan(1, capacity));
         require(count == expected.size(), "read must return available bytes up to output size");
-        require(std::equal(expected.begin(), expected.end(), storage.begin() + 1),
-                "ring payload/order mismatch");
+        require(std::equal(expected.begin(), expected.end(), storage.begin() + 1), "ring payload/order mismatch");
         require(storage.front() == 0xa5 &&
-                std::all_of(storage.begin() + 1 + count, storage.end(), [](auto v) { return v == 0xa5; }),
+                    std::all_of(storage.begin() + 1 + count, storage.end(), [](auto v) { return v == 0xa5; }),
                 "read overwrote guard or unused suffix");
         capturing();
     }
@@ -153,7 +157,8 @@ asio::awaitable<void> concurrentTxRx(Bench &b) {
     co_await b.deliver(bytes(7, 5));
     co_await b.flush();
     co_await b.expect(10, bytes(7, 5));
-    while (sending.wait_for(0ms) != std::future_status::ready) co_await b.pause(5ms);
+    while (sending.wait_for(0ms) != std::future_status::ready)
+        co_await b.pause(5ms);
     sending.get();
     co_await b.pause(20ms);
     require(b.hw.transmitted() == std::string(32, 'T'), "TX data lost during background RX");
@@ -165,10 +170,13 @@ asio::awaitable<void> overlappingReads(Bench &b) {
     auto waiting = asio::co_spawn(b.io, b.read(first), asio::use_future);
     co_await b.pause(2ms);
     bool rejected = false;
-    try { co_await b.uart.read(second); }
-    catch (const std::logic_error &) { rejected = true; }
+    try {
+        co_await b.uart.readSome(second);
+    } catch (const std::logic_error &) {
+        rejected = true;
+    }
     require(rejected, "second nonempty read must reject instead of replacing first handler");
-    require(co_await b.uart.read({}) == 0, "empty read should be a no-op even while another read waits");
+    require(co_await b.uart.readSome({}) == 0, "empty read should be a no-op even while another read waits");
     co_await b.deliver(bytes(2));
     co_await b.flush();
     require(waiting.wait_for(0ms) == std::future_status::ready && waiting.get() == 2,
@@ -180,9 +188,9 @@ asio::awaitable<void> overlappingReads(Bench &b) {
 
 asio::awaitable<void> configuration(Bench &b) {
     b.capturing();
-    const auto config = 96u | control1::DATA_BITS_8 | control1::PARITY_ENABLE |
-        control1::PARITY_ODD | control1::TWO_STOP_BITS |
-        ((irq::RX_EMPTY | irq::RX_TIMEOUT | irq::TX_FULL) << control1::IRQ_SHIFT);
+    const auto config = 96u | control1::DATA_BITS_8 | control1::PARITY_ENABLE | control1::PARITY_ODD |
+                        control1::TWO_STOP_BITS |
+                        ((irq::RX_EMPTY | irq::RX_TIMEOUT | irq::TX_FULL) << control1::IRQ_SHIFT);
     b.hw.write(Reg::CONTROL_1, config);
     require(b.hw.injectRxErrors(irq::FRAME_ERROR), "could not prepare unrelated source");
     co_await b.deliver(bytes(3));
@@ -199,15 +207,18 @@ asio::awaitable<void> emptyRead(Bench &b) {
     const auto status = b.hw.read(Reg::CONTROL_0);
     const auto count = b.hw.read(Reg::RX_BYTE_COUNT);
     const auto config = b.hw.read(Reg::CONTROL_1);
-    require(co_await b.uart.read({}) == 0, "empty read must return zero");
+    require(co_await b.uart.readSome({}) == 0, "empty read must return zero");
     require(b.hw.read(Reg::CONTROL_0) == status && b.hw.read(Reg::RX_BYTE_COUNT) == count &&
-            b.hw.read(Reg::CONTROL_1) == config && b.uart.rxBuffered() == 0,
+                b.hw.read(Reg::CONTROL_1) == config && b.uart.rxBuffered() == 0,
             "empty read changed hardware or queue state");
 }
 } // namespace
 
 int main() {
-    struct Case { std::string_view name; asio::awaitable<void> (*run)(Bench &); };
+    struct Case {
+        std::string_view name;
+        asio::awaitable<void> (*run)(Bench &);
+    };
     const Case cases[] = {
         {"capture without read / 50 bytes -> read 10 + 40", buffered},
         {"pending reader / no first-byte deadline / timeout publication", pending},
@@ -228,7 +239,8 @@ int main() {
             const auto deadline = std::chrono::steady_clock::now() + 2s;
             while (done.wait_for(0ms) != std::future_status::ready && std::chrono::steady_clock::now() < deadline)
                 b.io.run_one_for(10ms);
-            require(done.wait_for(0ms) == std::future_status::ready, "timed out: check capture/rearm, ring, and reader completion");
+            require(done.wait_for(0ms) == std::future_status::ready,
+                    "timed out: check capture/rearm, ring, and reader completion");
             done.get();
             std::cout << "PASS: " << test.name << '\n';
         } catch (const std::exception &e) {
